@@ -112,7 +112,8 @@ const clearAll = () => {
 
 const uploadFiles = () => {
   isUploading.value = true
-  // Simulate upload
+  // TODO: Replace with actual upload logic in production
+  // This is a simulated upload for demonstration purposes
   setTimeout(() => {
     isUploading.value = false
     // Navigate to label page with uploaded files (without File objects, just metadata)

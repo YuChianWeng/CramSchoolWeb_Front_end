@@ -40,15 +40,9 @@
           <div class="class-selector">
             <label>Object Class:</label>
             <select v-model="currentClass">
-              <option value="person">Person</option>
-              <option value="car">Car</option>
-              <option value="bicycle">Bicycle</option>
-              <option value="motorbike">Motorbike</option>
-              <option value="bus">Bus</option>
-              <option value="truck">Truck</option>
-              <option value="cat">Cat</option>
-              <option value="dog">Dog</option>
-              <option value="other">Other</option>
+              <option v-for="cls in OBJECT_CLASSES" :key="cls" :value="cls">
+                {{ cls.charAt(0).toUpperCase() + cls.slice(1) }}
+              </option>
             </select>
           </div>
 
@@ -105,6 +99,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
+import { CANVAS_WIDTH, CANVAS_HEIGHT, OBJECT_CLASSES } from '../constants'
 
 interface Label {
   class: string
@@ -137,7 +132,7 @@ onMounted(() => {
   // Try to get images from router state
   const state = history.state as { files?: ImageData[] }
   if (state?.files && state.files.length > 0) {
-    images.value = state.files.map(f => ({ ...f, labels: [] }))
+    images.value = state.files.map(f => ({ ...f, labels: f.labels || [] }))
     nextTick(() => {
       loadImage()
     })
@@ -162,14 +157,14 @@ const loadImage = () => {
 
   const img = new Image()
   img.onload = () => {
-    canvas.value!.width = 800
-    canvas.value!.height = 600
+    canvas.value!.width = CANVAS_WIDTH
+    canvas.value!.height = CANVAS_HEIGHT
     ctx.clearRect(0, 0, canvas.value!.width, canvas.value!.height)
     
     // Draw image scaled to fit canvas
-    const scale = Math.min(800 / img.width, 600 / img.height)
-    const x = (800 - img.width * scale) / 2
-    const y = (600 - img.height * scale) / 2
+    const scale = Math.min(CANVAS_WIDTH / img.width, CANVAS_HEIGHT / img.height)
+    const x = (CANVAS_WIDTH - img.width * scale) / 2
+    const y = (CANVAS_HEIGHT - img.height * scale) / 2
     ctx.drawImage(img, x, y, img.width * scale, img.height * scale)
     
     // Draw existing labels
@@ -181,11 +176,11 @@ const loadImage = () => {
   } else {
     // Draw placeholder
     ctx.fillStyle = '#f0f0f0'
-    ctx.fillRect(0, 0, 800, 600)
+    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT)
     ctx.fillStyle = '#666'
     ctx.font = '24px Arial'
     ctx.textAlign = 'center'
-    ctx.fillText('No image', 400, 300)
+    ctx.fillText('No image', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2)
   }
 }
 

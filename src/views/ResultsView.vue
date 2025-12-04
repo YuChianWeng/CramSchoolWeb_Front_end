@@ -125,6 +125,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { CANVAS_WIDTH, CANVAS_HEIGHT, CLASS_MAP } from '../constants'
 
 interface Label {
   class: string
@@ -206,18 +207,13 @@ const downloadResults = () => {
     let fileContent = ''
     labels.forEach(label => {
       // For YOLO format: class_id center_x center_y width height (all normalized 0-1)
-      // Assuming canvas size of 800x600 for normalization
-      const centerX = (label.x + label.width / 2) / 800
-      const centerY = (label.y + label.height / 2) / 600
-      const normWidth = label.width / 800
-      const normHeight = label.height / 600
+      // Using canvas dimensions for normalization
+      const centerX = (label.x + label.width / 2) / CANVAS_WIDTH
+      const centerY = (label.y + label.height / 2) / CANVAS_HEIGHT
+      const normWidth = label.width / CANVAS_WIDTH
+      const normHeight = label.height / CANVAS_HEIGHT
       
-      // Map class names to class IDs (simplified)
-      const classMap: Record<string, number> = {
-        'person': 0, 'car': 1, 'bicycle': 2, 'motorbike': 3,
-        'bus': 4, 'truck': 5, 'cat': 6, 'dog': 7, 'other': 8
-      }
-      const classId = classMap[label.class] || 8
+      const classId = CLASS_MAP[label.class] ?? CLASS_MAP['other']
       
       fileContent += `${classId} ${centerX.toFixed(6)} ${centerY.toFixed(6)} ${normWidth.toFixed(6)} ${normHeight.toFixed(6)}\n`
     })
