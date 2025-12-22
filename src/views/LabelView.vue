@@ -113,6 +113,9 @@ interface ImageData {
   name: string
   preview: string
   labels?: Label[]
+  predictionsLoaded?: boolean
+  isPredicting?: boolean
+  predictionError?: string
 }
 
 const router = useRouter()
@@ -134,7 +137,7 @@ onMounted(() => {
   if (state?.files && state.files.length > 0) {
     images.value = state.files.map(f => ({ ...f, labels: f.labels || [] }))
     nextTick(() => {
-      loadImage()
+      handleImageChange()
     })
   } else {
     // Load sample images for demonstration
@@ -146,8 +149,13 @@ onMounted(() => {
 })
 
 watch(currentImageIndex, () => {
-  loadImage()
+  handleImageChange()
 })
+
+const handleImageChange = () => {
+  loadImage()
+  fetchPredictionsForCurrentImage()
+}
 
 const loadImage = () => {
   if (!canvas.value || !currentImage.value) return
@@ -234,6 +242,58 @@ const draw = (event: MouseEvent) => {
     currentX.value - startX.value,
     currentY.value - startY.value
   )
+}
+
+const extractBase64FromPreview = (preview: string) => {
+  const separatorIndex = preview.indexOf(',')
+  return separatorIndex >= 0 ? preview.slice(separatorIndex + 1) : preview
+}
+
+const fetchPredictionsForCurrentImage = async () => {
+  const img = currentImage.value
+  if (!img || !img.preview || img.isPredicting || img.predictionsLoaded) return
+
+  img.isPredicting = true
+  img.predictionError = undefined
+
+  try {
+    const base64 = extractBase64FromPreview(img.preview)
+    const response = await fetch('http://140.115.54.239:8082/predict', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ image: base64 })
+    })
+
+    if (!response.ok) {
+      throw new Error(`Prediction failed with status ${response.status}`)
+    }
+
+    const data = await response.json()
+    const detections = data?.detections || data?.body?.json?.detections || []
+
+    const mappedLabels: Label[] = detections.map((detection: any) => {
+      const bbox = detection?.bbox || []
+      const [x, y, width, height] = bbox
+      return {
+        class: detection?.class || detection?.label || 'object',
+        x: Number(x) || 0,
+        y: Number(y) || 0,
+        width: Number(width) || 0,
+        height: Number(height) || 0
+      }
+    })
+
+    img.labels = mappedLabels
+    img.predictionsLoaded = true
+    loadImage()
+  } catch (error: any) {
+    console.error('Error fetching predictions:', error)
+    img.predictionError = error?.message || 'Unable to fetch predictions'
+  } finally {
+    img.isPredicting = false
+  }
 }
 
 const endDrawing = () => {
