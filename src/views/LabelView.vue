@@ -377,7 +377,14 @@ const fetchPredictionsForCurrentImage = async () => {
     loadImage()
   } catch (error: any) {
     console.error('Error fetching predictions:', error)
-    img.predictionError = error?.message || 'Unable to fetch predictions'
+    const message = error?.message || 'Unable to fetch predictions'
+    if (message.includes('Failed to fetch')) {
+      img.predictionError = '無法連線到偵測伺服器（可能是網路問題或瀏覽器阻擋 CORS）'
+    } else if (message.startsWith('Prediction failed with status')) {
+      img.predictionError = '偵測服務回應錯誤，請稍後再試或聯繫管理員'
+    } else {
+      img.predictionError = message
+    }
   } finally {
     img.isPredicting = false
   }
