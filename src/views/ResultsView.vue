@@ -30,7 +30,14 @@
         </div>
 
         <div class="image-grid">
-          <article v-for="img in scoredImages" :key="img.name" class="image-card">
+          <article
+            v-for="(img, idx) in scoredImages"
+            :key="img.name"
+            class="image-card"
+            role="button"
+            tabindex="0"
+            @click="openModal(idx)"
+          >
             <div class="thumb">
               <img :src="img.preview || placeholderImage" :alt="img.name" />
               <div class="overlay">
@@ -52,7 +59,10 @@
             <div class="card-body">
               <div class="card-title">
                 <h3>{{ img.name }}</h3>
-                <span class="accuracy">{{ img.graded ? img.accuracy + '%' : '尚未批改' }}</span>
+                <div class="title-metrics">
+                  <span class="fraction inline">{{ img.correctCount }}/{{ img.totalLabels }}</span>
+                  <span class="accuracy">{{ img.graded ? img.accuracy + '%' : '尚未批改' }}</span>
+                </div>
               </div>
               <div v-if="img.labels.length" class="answers">
                 <div
@@ -80,10 +90,46 @@
       </section>
     </div>
   </div>
+
+  <div v-if="selectedImage" class="modal" @click="closeModal">
+    <div class="modal-content" @click.stop>
+      <button class="modal-close" @click="closeModal">×</button>
+      <h3>{{ selectedImage.name }}</h3>
+      <div class="modal-image-wrap">
+        <img :src="selectedImage.preview || placeholderImage" :alt="selectedImage.name" />
+        <div class="box-layer" v-if="selectedImage.labels.length">
+          <div
+            v-for="(label, idx) in selectedImage.labels"
+            :key="idx"
+            class="bbox"
+            :class="label.isCorrect === true ? 'bbox-correct' : label.isCorrect === false ? 'bbox-wrong' : 'bbox-pending'"
+            :style="boxStyle(label)"
+          >
+            <span class="bbox-tag">#{{ idx + 1 }} {{ label.recognizedAnswer || '—' }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="selectedImage.labels.length" class="answers modal-answers">
+        <div
+          v-for="(label, idx) in selectedImage.labels"
+          :key="idx"
+          class="answer-row"
+        >
+          <span class="answer-index">#{{ idx + 1 }}</span>
+          <span class="answer-text">OCR：{{ label.recognizedAnswer || '—' }}</span>
+          <span class="answer-text">正解：{{ label.expectedAnswer || '—' }}</span>
+          <span class="answer-chip" :class="label.isCorrect ? 'chip-correct' : label.isCorrect === false ? 'chip-wrong' : 'chip-pending'">
+            {{ label.isCorrect === undefined ? '未判定' : label.isCorrect ? '正確' : '錯誤' }}
+          </span>
+        </div>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 interface LabelResult {
@@ -116,6 +162,7 @@ interface NormalizedImage extends IncomingImage {
 
 const router = useRouter()
 const scoredImages = ref<NormalizedImage[]>([])
+const selectedIndex = ref<number | null>(null)
 const placeholderImage =
   'data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"200\" viewBox=\"0 0 320 200\" fill=\"none\"><rect width=\"320\" height=\"200\" rx=\"12\" fill=\"%23e8f5e9\"/><text x=\"50%\" y=\"50%\" dominant-baseline=\"middle\" text-anchor=\"middle\" font-family=\"Arial\" font-size=\"16\" fill=\"%23666\">預覽圖片</text></svg>'
 const BASE_CANVAS_WIDTH = 800
@@ -203,6 +250,18 @@ const boxStyle = (label: LabelResult) => {
     height: `${height}%`
   }
 }
+
+const openModal = (idx: number) => {
+  selectedIndex.value = idx
+}
+
+const closeModal = () => {
+  selectedIndex.value = null
+}
+
+const selectedImage = computed(() =>
+  selectedIndex.value !== null ? scoredImages.value[selectedIndex.value] : null
+)
 </script>
 
 <style scoped>
@@ -388,6 +447,11 @@ h1 {
   font-weight: 700;
 }
 
+.fraction.inline {
+  background: #eef4f8;
+  color: #1f2d3d;
+}
+
 .badge {
   padding: 0.35rem 0.65rem;
   border-radius: 6px;
@@ -435,6 +499,12 @@ h1 {
   border-radius: 6px;
   font-weight: 700;
   font-size: 0.9rem;
+}
+
+.title-metrics {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .card-meta {
@@ -493,6 +563,73 @@ h1 {
 .chip-pending {
   background: #fff7e6;
   color: #c47c00;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+.modal-content {
+  background: white;
+  border-radius: 12px;
+  padding: 1.25rem;
+  max-width: 1100px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  position: relative;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.2);
+}
+
+.modal-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  border: none;
+  background: #ff5252;
+  color: white;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  font-size: 1.2rem;
+  cursor: pointer;
+}
+
+.modal-image-wrap {
+  position: relative;
+  background: #f8fafc;
+  border: 1px solid #e4e9ed;
+  border-radius: 8px;
+  overflow: hidden;
+  max-height: 600px;
+}
+
+.modal-image-wrap img {
+  width: 100%;
+  display: block;
+  object-fit: contain;
+}
+
+.bbox-tag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  background: rgba(31, 45, 61, 0.8);
+  color: white;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.8rem;
+  border-bottom-right-radius: 6px;
+}
+
+.modal-answers {
+  margin-top: 1rem;
 }
 
 @media (max-width: 768px) {
