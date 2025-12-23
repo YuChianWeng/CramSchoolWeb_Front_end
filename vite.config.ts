@@ -10,9 +10,22 @@ export default defineConfig({
     vue(),
     vueDevTools(),
   ],
+
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url))
+    },
+  },
+
+  // ✅ 新增這一段（關鍵）
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://140.115.54.239:8082',
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
     },
   },
 })

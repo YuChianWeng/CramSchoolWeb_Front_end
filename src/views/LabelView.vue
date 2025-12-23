@@ -335,12 +335,15 @@ const fetchPredictionsForCurrentImage = async () => {
     const previewImg = await loadPreviewImage(img.preview)
     const { scale, offsetX, offsetY } = computeFit(previewImg.width, previewImg.height)
     const base64 = extractBase64FromPreview(img.preview)
-    const response = await fetch('http://140.115.54.239:8082/predict', {
+    const image_base64 = base64.includes('base64,')
+    ? base64.split('base64,')[1]
+    : base64
+    const response = await fetch('/api/predict', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ image: base64 })
+      body: JSON.stringify({ image_base64 })
     })
 
     if (!response.ok) {
