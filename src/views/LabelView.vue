@@ -26,83 +26,97 @@
       </div>
 
       <div class="main-area">
-        <div class="image-display">
-          <canvas
-            ref="canvas"
-            @mousedown="startDrawing"
-            @mousemove="draw"
-            @mouseup="endDrawing"
-            @mouseleave="endDrawing"
-            @wheel.prevent="handleWheel"
-          ></canvas>
-          <div class="view-controls">
-            <div class="zoom-controls">
-              <button @click="changeZoom(0.1)">＋</button>
-              <span>{{ Math.round(zoom * 100) }}%</span>
-              <button @click="changeZoom(-0.1)">－</button>
-            </div>
-            <div class="pan-controls">
-              <button @click="nudgePan('up')">↑</button>
-              <div class="pan-middle">
-                <button @click="nudgePan('left')">←</button>
-                <button @click="resetView">重置</button>
-                <button @click="nudgePan('right')">→</button>
+        <div class="workspace-main">
+          <div class="image-display">
+            <canvas
+              ref="canvas"
+              @mousedown="startDrawing"
+              @mousemove="draw"
+              @mouseup="endDrawing"
+              @mouseleave="endDrawing"
+              @wheel.prevent="handleWheel"
+            ></canvas>
+            <div class="view-controls">
+              <div class="zoom-controls">
+                <button @click="changeZoom(0.1)">＋</button>
+                <span>{{ Math.round(zoom * 100) }}%</span>
+                <button @click="changeZoom(-0.1)">－</button>
               </div>
-              <button @click="nudgePan('down')">↓</button>
+              <div class="pan-controls">
+                <button @click="nudgePan('up')">↑</button>
+                <div class="pan-middle">
+                  <button @click="nudgePan('left')">←</button>
+                  <button @click="resetView">重置</button>
+                  <button @click="nudgePan('right')">→</button>
+                </div>
+                <button @click="nudgePan('down')">↓</button>
+              </div>
+              <p class="hint">按住 Alt 拖曳即可移動畫面</p>
             </div>
-            <p class="hint">按住 Alt 拖曳即可移動畫面</p>
+            <div class="prediction-state" v-if="currentImage">
+              <span v-if="currentImage.isPredicting" class="state loading">偵測中...</span>
+              <span v-else-if="currentImage.predictionError" class="state error">
+                {{ currentImage.predictionError }}
+                <button @click="retryPrediction" class="retry-btn">重試</button>
+              </span>
+              <span v-else-if="currentImage.predictionsLoaded" class="state success">已套用偵測結果</span>
+              <span v-else class="state idle">等待偵測</span>
+            </div>
           </div>
-        </div>
 
-        <div class="controls">
-          <div class="class-selector single-class">
-            <label>標註類型：</label>
-            <span class="single-class-label">{{ DEFAULT_CLASS }}</span>
-          </div>
+          <div class="controls">
+            <div class="class-selector single-class">
+              <label>標註類型：</label>
+              <span class="single-class-label">{{ DEFAULT_CLASS }}</span>
+              <button @click="retryPrediction" :disabled="currentImage?.isPredicting" class="retry-btn">
+                重新偵測
+              </button>
+            </div>
 
-          <div class="label-list">
-            <h3>Labels for current image:</h3>
-            <div v-if="currentImage?.labels && currentImage.labels.length > 0">
-              <div 
-                v-for="(label, index) in currentImage.labels" 
-                :key="index"
-                class="label-item"
+            <div class="label-list">
+              <h3>Labels for current image:</h3>
+              <div v-if="currentImage?.labels && currentImage.labels.length > 0" class="label-scroll">
+                <div
+                  v-for="(label, index) in currentImage.labels"
+                  :key="index"
+                  class="label-item"
+                >
+                  <span class="label-class">{{ label.class }}</span>
+                  <span class="label-coords">
+                    ({{ Math.round(label.x) }}, {{ Math.round(label.y) }},
+                     {{ Math.round(label.width) }}×{{ Math.round(label.height) }})
+                  </span>
+                  <button @click="removeLabel(index)" class="remove-label-btn">×</button>
+                </div>
+              </div>
+              <p v-else class="no-labels">No labels yet. Draw boxes on the image.</p>
+            </div>
+
+            <div class="navigation">
+              <button
+                @click="previousImage"
+                :disabled="currentImageIndex === 0"
+                class="nav-btn"
               >
-                <span class="label-class">{{ label.class }}</span>
-                <span class="label-coords">
-                  ({{ Math.round(label.x) }}, {{ Math.round(label.y) }}, 
-                   {{ Math.round(label.width) }}×{{ Math.round(label.height) }})
-                </span>
-                <button @click="removeLabel(index)" class="remove-label-btn">×</button>
-              </div>
+                ← Previous
+              </button>
+              <span class="image-counter">
+                {{ currentImageIndex + 1 }} / {{ images.length }}
+              </span>
+              <button
+                @click="nextImage"
+                :disabled="currentImageIndex === images.length - 1"
+                class="nav-btn"
+              >
+                Next →
+              </button>
             </div>
-            <p v-else class="no-labels">No labels yet. Draw boxes on the image.</p>
-          </div>
 
-          <div class="navigation">
-            <button 
-              @click="previousImage" 
-              :disabled="currentImageIndex === 0"
-              class="nav-btn"
-            >
-              ← Previous
-            </button>
-            <span class="image-counter">
-              {{ currentImageIndex + 1 }} / {{ images.length }}
-            </span>
-            <button 
-              @click="nextImage" 
-              :disabled="currentImageIndex === images.length - 1"
-              class="nav-btn"
-            >
-              Next →
-            </button>
-          </div>
-
-          <div class="action-buttons">
-            <button @click="clearLabels" class="clear-labels-btn">Clear Labels</button>
-            <button @click="exportLabels" class="export-btn">Export Labels</button>
-            <button @click="goToResults" class="results-btn">View Results</button>
+            <div class="action-buttons">
+              <button @click="clearLabels" class="clear-labels-btn">Clear Labels</button>
+              <button @click="exportLabels" class="export-btn">Export Labels</button>
+              <button @click="goToResults" class="results-btn">View Results</button>
+            </div>
           </div>
         </div>
       </div>
@@ -155,15 +169,21 @@ onMounted(() => {
   // Try to get images from router state
   const state = history.state as { files?: ImageData[] }
   if (state?.files && state.files.length > 0) {
-    images.value = state.files.map(f => ({ ...f, labels: f.labels || [] }))
+    images.value = state.files.map(f => ({
+      ...f,
+      labels: f.labels || [],
+      predictionsLoaded: false,
+      isPredicting: false,
+      predictionError: undefined
+    }))
     nextTick(() => {
       handleImageChange()
     })
   } else {
     // Load sample images for demonstration
     images.value = [
-      { name: 'sample1.jpg', preview: '', labels: [] },
-      { name: 'sample2.jpg', preview: '', labels: [] }
+      { name: 'sample1.jpg', preview: '', labels: [], predictionsLoaded: false },
+      { name: 'sample2.jpg', preview: '', labels: [], predictionsLoaded: false }
     ]
   }
 })
@@ -176,6 +196,10 @@ const handleImageChange = () => {
   panX.value = 0
   panY.value = 0
   zoom.value = 1
+  if (currentImage.value) {
+    currentImage.value.predictionError = undefined
+    if (!currentImage.value.labels) currentImage.value.labels = []
+  }
   loadImage()
   fetchPredictionsForCurrentImage()
 }
@@ -334,10 +358,10 @@ const fetchPredictionsForCurrentImage = async () => {
       const normalizedX2 = Number(x2) || 0
       const normalizedY2 = Number(y2) || 0
 
-      const boxX = normalizedX1 * scale + offsetX
-      const boxY = normalizedY1 * scale + offsetY
-      const boxWidth = (normalizedX2 - normalizedX1) * scale
-      const boxHeight = (normalizedY2 - normalizedY1) * scale
+      const boxX = Math.max(0, normalizedX1 * scale + offsetX)
+      const boxY = Math.max(0, normalizedY1 * scale + offsetY)
+      const boxWidth = Math.abs(normalizedX2 - normalizedX1) * scale
+      const boxHeight = Math.abs(normalizedY2 - normalizedY1) * scale
 
       return {
         class: DEFAULT_CLASS,
@@ -357,6 +381,16 @@ const fetchPredictionsForCurrentImage = async () => {
   } finally {
     img.isPredicting = false
   }
+}
+
+const retryPrediction = () => {
+  const img = currentImage.value
+  if (!img || img.isPredicting) return
+
+  img.predictionsLoaded = false
+  img.predictionError = undefined
+  img.labels = []
+  fetchPredictionsForCurrentImage()
 }
 
 const endDrawing = () => {
@@ -631,6 +665,13 @@ h1 {
   gap: 1rem;
 }
 
+.workspace-main {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  height: 100%;
+}
+
 .image-display {
   background-color: #f5f5f5;
   border-radius: 8px;
@@ -639,6 +680,10 @@ h1 {
   align-items: center;
   overflow: hidden;
   flex-direction: column;
+  flex: 1;
+  padding: 1rem;
+  position: relative;
+  min-height: 680px;
 }
 
 canvas {
@@ -691,6 +736,55 @@ canvas {
   font-size: 0.875rem;
 }
 
+.prediction-state {
+  margin-top: 0.75rem;
+  width: 100%;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  color: #2c3e50;
+}
+
+.state {
+  font-size: 0.9rem;
+}
+
+.state.loading {
+  color: #ff9800;
+}
+
+.state.error {
+  color: #d32f2f;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.state.success {
+  color: #42b883;
+}
+
+.state.idle {
+  color: #666;
+}
+
+.retry-btn {
+  background-color: #2196f3;
+  color: #fff;
+  border: none;
+  padding: 0.3rem 0.6rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.retry-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .single-class {
   display: flex;
   align-items: center;
@@ -709,13 +803,18 @@ canvas {
   background-color: #f5f5f5;
   border-radius: 8px;
   padding: 1rem;
+  width: 360px;
+  max-width: 380px;
+  height: 100%;
+  overflow-y: auto;
 }
 
 .class-selector {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: 0.75rem;
   margin-bottom: 1rem;
+  flex-wrap: wrap;
 }
 
 .class-selector label {
@@ -740,6 +839,12 @@ canvas {
   margin-bottom: 0.5rem;
 }
 
+.label-scroll {
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
 .label-item {
   display: flex;
   align-items: center;
@@ -759,6 +864,7 @@ canvas {
   font-size: 0.875rem;
   color: #666;
   flex: 1;
+  text-align: right;
 }
 
 .remove-label-btn {
