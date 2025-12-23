@@ -1,588 +1,593 @@
 <template>
-  <div class="results-container">
-    <h1>Labeling Results</h1>
-    
-    <div v-if="images.length === 0" class="no-results">
-      <p>No results to display. Please label images first.</p>
-      <button @click="goToLabel" class="label-link-btn">Go to Label Page</button>
+  <div class="results-page">
+    <div class="page-header">
+      <div>
+        <p class="eyebrow">批改結果</p>
+        <h1>每張照片的正確率</h1>
+        <p class="subtext">顯示 YOLO 標籤配對正確答案的數量，並快速回顧 OCR 辨識結果。</p>
+      </div>
+      <div class="header-actions">
+        <button class="ghost-btn" @click="goToUpload">重新上傳</button>
+        <button class="primary-btn" @click="goToLabel">返回標記</button>
+      </div>
     </div>
 
-    <div v-else class="results-content">
-      <div class="summary">
-        <h2>Summary</h2>
-        <div class="stats">
-          <div class="stat-item">
-            <span class="stat-label">Total Images:</span>
-            <span class="stat-value">{{ images.length }}</span>
-          </div>
-          <div class="stat-item">
-            <span class="stat-label">Total Labels:</span>
-            <span class="stat-value">{{ totalLabels }}</span>
-          </div>
-          <div class="stat-item">
-            <span class="stat-label">Average Labels per Image:</span>
-            <span class="stat-value">{{ averageLabels }}</span>
-          </div>
-        </div>
+    <div v-if="scoredImages.length === 0" class="empty-state">
+      <p>目前沒有批改結果，請先完成標記與批改。</p>
+      <div class="empty-actions">
+        <button class="primary-btn" @click="goToUpload">上傳照片</button>
+        <button class="ghost-btn" @click="goToLabel">回到標記頁</button>
+      </div>
+    </div>
 
-        <div class="class-distribution">
-          <h3>Class Distribution</h3>
-          <div class="chart">
-            <div 
-              v-for="(count, className) in classDistribution" 
-              :key="className"
-              class="chart-bar"
-            >
-              <div class="bar-label">{{ className }}</div>
-              <div class="bar-wrapper">
-                <div 
-                  class="bar-fill" 
-                  :style="{ width: (count / maxClassCount * 100) + '%' }"
-                ></div>
-                <span class="bar-count">{{ count }}</span>
-              </div>
-            </div>
-          </div>
+    <div v-else class="results-body">
+      <div class="summary-grid">
+        <div class="summary-card highlight">
+          <p class="label">總正確 / 總標籤</p>
+          <div class="value">{{ overallCorrect }} / {{ overallTotal }}</div>
+          <p class="hint">涵蓋 {{ scoredImages.length }} 張照片</p>
+        </div>
+        <div class="summary-card">
+          <p class="label">平均正確率</p>
+          <div class="value">{{ averageAccuracy }}%</div>
+          <p class="hint">只計算已批改的照片</p>
+        </div>
+        <div class="summary-card">
+          <p class="label">批改完成 / 全部</p>
+          <div class="value">{{ gradedCount }} / {{ scoredImages.length }}</div>
+          <p class="hint">未批改的照片顯示為「待批改」</p>
+        </div>
+        <div class="summary-card">
+          <p class="label">最高 / 最低正確率</p>
+          <div class="value">{{ maxAccuracy }}% / {{ minAccuracy }}%</div>
+          <p class="hint">以每張照片計算</p>
         </div>
       </div>
 
-      <div class="image-results">
-        <h2>Labeled Images</h2>
+      <section class="image-section">
+        <div class="section-header">
+          <div>
+            <h2>照片批改列表</h2>
+            <p class="subtext">檢視每張照片的正確數量與錯誤標籤。</p>
+          </div>
+        </div>
+
         <div class="image-grid">
-          <div 
-            v-for="(img, index) in images" 
-            :key="index"
-            class="result-item"
-            @click="viewDetails(index)"
-          >
-            <div class="result-image">
-              <img :src="img.preview" :alt="img.name" />
-              <div class="label-overlay">
-                {{ img.labels?.length || 0 }} labels
-              </div>
-            </div>
-            <div class="result-info">
-              <h4>{{ img.name }}</h4>
-              <div v-if="img.labels && img.labels.length > 0" class="label-tags">
-                <span 
-                  v-for="(label, labelIndex) in img.labels" 
-                  :key="labelIndex"
-                  class="label-tag"
-                >
-                  {{ label.class }}
-                </span>
-              </div>
-              <p v-else class="no-labels-text">No labels</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="actions">
-        <button @click="downloadResults" class="download-btn">
-          📥 Download YOLO Format
-        </button>
-        <button @click="downloadJSON" class="download-btn">
-          📄 Download JSON
-        </button>
-        <button @click="goToLabel" class="back-btn">
-          ← Back to Labeling
-        </button>
-        <button @click="goToUpload" class="upload-btn">
-          📁 Upload New Images
-        </button>
-      </div>
-    </div>
-
-    <!-- Details Modal -->
-    <div v-if="selectedImage !== null && images[selectedImage]" class="modal" @click="closeModal">
-      <div class="modal-content" @click.stop>
-        <button class="modal-close" @click="closeModal">×</button>
-        <h3>{{ images[selectedImage]!.name }}</h3>
-        <img :src="images[selectedImage]!.preview" :alt="images[selectedImage]!.name" class="modal-image" />
-        <div class="modal-labels">
-          <h4>Labels ({{ images[selectedImage]!.labels?.length || 0 }}):</h4>
-          <div v-if="images[selectedImage]!.labels && images[selectedImage]!.labels!.length > 0">
-            <div 
-              v-for="(label, index) in images[selectedImage]!.labels" 
-              :key="index"
-              class="modal-label-item"
-            >
-              <span class="modal-label-class">{{ label.class }}</span>
-              <span class="modal-label-coords">
-                Position: ({{ Math.round(label.x) }}, {{ Math.round(label.y) }}) | 
-                Size: {{ Math.round(label.width) }}×{{ Math.round(label.height) }}px
+          <article v-for="img in scoredImages" :key="img.name" class="image-card">
+            <div class="thumb">
+              <img :src="img.preview || placeholderImage" :alt="img.name" />
+              <span class="badge" :class="img.graded ? 'badge-graded' : 'badge-pending'">
+                {{ img.graded ? '已批改' : '待批改' }}
               </span>
             </div>
-          </div>
-          <p v-else>No labels for this image</p>
+            <div class="card-body">
+              <div class="card-title">
+                <h3>{{ img.name }}</h3>
+                <span class="ratio">{{ img.correctCount }} / {{ img.totalLabels }}</span>
+              </div>
+
+              <div class="progress">
+                <div class="progress-bar" :style="{ width: (img.graded ? img.accuracy : 0) + '%' }"></div>
+                <span class="progress-text">{{ img.graded ? img.accuracy + '%' : '尚未批改' }}</span>
+              </div>
+
+              <div class="card-meta">
+                <span>正確 <strong>{{ img.correctCount }}</strong></span>
+                <span>錯誤 <strong>{{ img.incorrectCount }}</strong></span>
+                <span>標籤總數 <strong>{{ img.totalLabels }}</strong></span>
+              </div>
+
+              <div v-if="img.labels.length" class="label-table">
+                <div class="label-row header">
+                  <span>#</span>
+                  <span>預測答案</span>
+                  <span>正確答案</span>
+                  <span>結果</span>
+                </div>
+                <div v-for="(label, idx) in img.labels" :key="idx" class="label-row">
+                  <span class="muted">#{{ idx + 1 }}</span>
+                  <span>{{ label.recognizedAnswer || '—' }}</span>
+                  <span>{{ label.expectedAnswer || '—' }}</span>
+                  <span>
+                    <span
+                      class="chip"
+                      :class="label.isCorrect === true ? 'chip-correct' : label.isCorrect === false ? 'chip-wrong' : 'chip-pending'"
+                    >
+                      {{ label.isCorrect === undefined ? '未判定' : label.isCorrect ? '✔ 正確' : '✖ 錯誤' }}
+                    </span>
+                  </span>
+                </div>
+              </div>
+              <p v-else class="muted">此照片目前沒有標籤。</p>
+            </div>
+          </article>
         </div>
-      </div>
+      </section>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { CANVAS_WIDTH, CANVAS_HEIGHT, CLASS_MAP } from '../constants'
 
-interface Label {
-  class: string
-  x: number
-  y: number
-  width: number
-  height: number
+interface LabelResult {
+  recognizedAnswer?: string
+  expectedAnswer?: string
+  isCorrect?: boolean
 }
 
-interface ImageData {
+interface IncomingImage {
   name: string
+  preview?: string
+  labels?: LabelResult[]
+  correctCount?: number
+  totalLabels?: number
+}
+
+interface NormalizedImage extends IncomingImage {
   preview: string
-  labels?: Label[]
+  labels: LabelResult[]
+  correctCount: number
+  totalLabels: number
+  incorrectCount: number
+  accuracy: number
+  graded: boolean
 }
 
 const router = useRouter()
-const images = ref<ImageData[]>([])
-const selectedImage = ref<number | null>(null)
+const scoredImages = ref<NormalizedImage[]>([])
+const placeholderImage =
+  'data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"200\" viewBox=\"0 0 320 200\" fill=\"none\"><rect width=\"320\" height=\"200\" rx=\"12\" fill=\"%23e8f5e9\"/><text x=\"50%\" y=\"50%\" dominant-baseline=\"middle\" text-anchor=\"middle\" font-family=\"Arial\" font-size=\"16\" fill=\"%23666\">預覽圖片</text></svg>'
+
+const normalizeImage = (img: IncomingImage): NormalizedImage => {
+  const labels = img.labels ?? []
+  const gradedLabels = labels.filter(label => typeof label.isCorrect === 'boolean')
+  const providedCorrect = typeof img.correctCount === 'number' ? img.correctCount : null
+  const totalLabels = typeof img.totalLabels === 'number' ? img.totalLabels : labels.length
+  const derivedCorrect = gradedLabels.filter(label => label.isCorrect).length
+  const correctCount = providedCorrect ?? derivedCorrect
+  const boundedCorrect = Math.min(Math.max(correctCount, 0), totalLabels || Number.MAX_SAFE_INTEGER)
+  const graded = providedCorrect !== null || gradedLabels.length > 0
+  const accuracy = totalLabels > 0 ? Math.round((boundedCorrect / totalLabels) * 100) : 0
+  const incorrectCount = Math.max(totalLabels - boundedCorrect, 0)
+
+  return {
+    ...img,
+    preview: img.preview || '',
+    labels,
+    correctCount: boundedCorrect,
+    totalLabels,
+    incorrectCount,
+    accuracy,
+    graded
+  }
+}
+
+const loadResultsFromState = () => {
+  const state = history.state as { results?: IncomingImage[]; images?: IncomingImage[] }
+  const payload = state?.results || state?.images
+
+  if (payload && payload.length > 0) {
+    scoredImages.value = payload.map(normalizeImage)
+    return
+  }
+
+  scoredImages.value = createSampleResults()
+}
+
+const createSampleResults = (): NormalizedImage[] => {
+  const samples: IncomingImage[] = [
+    {
+      name: 'exam-01.jpg',
+      correctCount: 14,
+      totalLabels: 20,
+      labels: [
+        { recognizedAnswer: 'A', expectedAnswer: 'A', isCorrect: true },
+        { recognizedAnswer: 'B', expectedAnswer: 'C', isCorrect: false },
+        { recognizedAnswer: 'D', expectedAnswer: 'D', isCorrect: true },
+        { recognizedAnswer: '未辨識', expectedAnswer: 'B', isCorrect: false }
+      ]
+    },
+    {
+      name: 'exam-02.jpg',
+      correctCount: 18,
+      totalLabels: 20,
+      labels: [
+        { recognizedAnswer: 'C', expectedAnswer: 'C', isCorrect: true },
+        { recognizedAnswer: 'B', expectedAnswer: 'B', isCorrect: true },
+        { recognizedAnswer: 'A', expectedAnswer: 'D', isCorrect: false }
+      ]
+    },
+    {
+      name: 'exam-03.jpg',
+      correctCount: 12,
+      totalLabels: 22,
+      labels: [
+        { recognizedAnswer: 'D', expectedAnswer: 'D', isCorrect: true },
+        { recognizedAnswer: 'B', expectedAnswer: 'B', isCorrect: true },
+        { recognizedAnswer: 'A', expectedAnswer: 'B', isCorrect: false }
+      ]
+    }
+  ]
+
+  return samples.map(normalizeImage)
+}
 
 onMounted(() => {
-  // Try to get images from router state
-  const state = history.state as { images?: ImageData[] }
-  if (state?.images && state.images.length > 0) {
-    images.value = state.images
-  }
+  loadResultsFromState()
 })
 
-const totalLabels = computed(() => {
-  return images.value.reduce((sum, img) => sum + (img.labels?.length || 0), 0)
+const overallCorrect = computed(() =>
+  scoredImages.value.reduce((sum, img) => sum + (img.correctCount || 0), 0)
+)
+const overallTotal = computed(() =>
+  scoredImages.value.reduce((sum, img) => sum + (img.totalLabels || 0), 0)
+)
+
+const gradedAccuracies = computed(() =>
+  scoredImages.value
+    .filter(img => img.graded && img.totalLabels > 0)
+    .map(img => img.accuracy)
+)
+
+const averageAccuracy = computed(() => {
+  if (gradedAccuracies.value.length === 0) return '0.0'
+  const total = gradedAccuracies.value.reduce((sum, acc) => sum + acc, 0)
+  return (total / gradedAccuracies.value.length).toFixed(1)
 })
 
-const averageLabels = computed(() => {
-  if (images.value.length === 0) return '0.0'
-  return (totalLabels.value / images.value.length).toFixed(1)
-})
-
-const classDistribution = computed(() => {
-  const distribution: Record<string, number> = {}
-  images.value.forEach(img => {
-    img.labels?.forEach(label => {
-      distribution[label.class] = (distribution[label.class] || 0) + 1
-    })
-  })
-  return distribution
-})
-
-const maxClassCount = computed(() => {
-  const counts = Object.values(classDistribution.value)
-  return counts.length > 0 ? Math.max(...counts) : 1
-})
-
-const viewDetails = (index: number) => {
-  selectedImage.value = index
-}
-
-const closeModal = () => {
-  selectedImage.value = null
-}
+const maxAccuracy = computed(() =>
+  gradedAccuracies.value.length ? Math.max(...gradedAccuracies.value) : 0
+)
+const minAccuracy = computed(() =>
+  gradedAccuracies.value.length ? Math.min(...gradedAccuracies.value) : 0
+)
+const gradedCount = computed(() => scoredImages.value.filter(img => img.graded).length)
 
 const goToLabel = () => {
-  router.push({ 
+  router.push({
     name: 'label',
-    state: { files: images.value }
+    state: { files: scoredImages.value }
   })
 }
 
 const goToUpload = () => {
   router.push({ name: 'upload' })
 }
-
-const downloadResults = () => {
-  // Convert to YOLO format (normalized coordinates)
-  let yoloContent = ''
-  
-  images.value.forEach(img => {
-    const labels = img.labels || []
-    const fileName = img.name.replace(/\.[^/.]+$/, '.txt')
-    
-    let fileContent = ''
-    labels.forEach(label => {
-      // For YOLO format: class_id center_x center_y width height (all normalized 0-1)
-      // Using canvas dimensions for normalization
-      const centerX = (label.x + label.width / 2) / CANVAS_WIDTH
-      const centerY = (label.y + label.height / 2) / CANVAS_HEIGHT
-      const normWidth = label.width / CANVAS_WIDTH
-      const normHeight = label.height / CANVAS_HEIGHT
-      
-      const classId = CLASS_MAP[label.class] ?? CLASS_MAP['other']
-      
-      fileContent += `${classId} ${centerX.toFixed(6)} ${centerY.toFixed(6)} ${normWidth.toFixed(6)} ${normHeight.toFixed(6)}\n`
-    })
-    
-    yoloContent += `\n=== ${fileName} ===\n${fileContent}`
-  })
-  
-  // Create and download file
-  const blob = new Blob([yoloContent], { type: 'text/plain' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = 'yolo_annotations.txt'
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
-const downloadJSON = () => {
-  const jsonData = images.value.map(img => ({
-    image: img.name,
-    labels: img.labels || [],
-    label_count: img.labels?.length || 0
-  }))
-  
-  const blob = new Blob([JSON.stringify(jsonData, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = 'annotations.json'
-  a.click()
-  URL.revokeObjectURL(url)
-}
 </script>
 
 <style scoped>
-.results-container {
-  max-width: 1400px;
+.results-page {
+  max-width: 1280px;
   margin: 0 auto;
   padding: 2rem;
 }
 
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.eyebrow {
+  margin: 0;
+  color: #42b883;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  font-size: 0.85rem;
+}
+
 h1 {
-  text-align: center;
-  color: #2c3e50;
-  margin-bottom: 2rem;
+  margin: 0.25rem 0;
+  color: #1f2d3d;
+  font-size: 1.75rem;
 }
 
-.no-results {
-  text-align: center;
-  padding: 4rem;
+.subtext {
+  margin: 0;
+  color: #5f6b7a;
 }
 
-.no-results p {
-  font-size: 1.2rem;
-  color: #666;
-  margin-bottom: 1rem;
+.header-actions {
+  display: flex;
+  gap: 0.75rem;
 }
 
-.label-link-btn {
-  background-color: #42b883;
-  color: white;
-  border: none;
-  padding: 0.75rem 2rem;
-  font-size: 1rem;
-  border-radius: 4px;
+.primary-btn,
+.ghost-btn {
+  border-radius: 8px;
+  padding: 0.65rem 1.25rem;
+  font-size: 0.95rem;
   cursor: pointer;
-  transition: background-color 0.3s;
+  border: 1px solid transparent;
+  transition: all 0.2s ease;
 }
 
-.label-link-btn:hover {
-  background-color: #35945d;
+.primary-btn {
+  background: linear-gradient(135deg, #42b883, #2f9b6f);
+  color: white;
+  border-color: #2f9b6f;
 }
 
-.results-content {
+.primary-btn:hover {
+  filter: brightness(0.95);
+}
+
+.ghost-btn {
+  background: white;
+  color: #1f2d3d;
+  border-color: #d7dee5;
+}
+
+.ghost-btn:hover {
+  background: #eef4f8;
+}
+
+.empty-state {
+  background: white;
+  border: 1px dashed #d7dee5;
+  border-radius: 12px;
+  padding: 2rem;
+  text-align: center;
+  color: #5f6b7a;
+}
+
+.empty-actions {
+  margin-top: 1rem;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+}
+
+.results-body {
   display: flex;
   flex-direction: column;
-  gap: 2rem;
+  gap: 1.5rem;
 }
 
-.summary {
-  background-color: #f5f5f5;
-  border-radius: 8px;
-  padding: 2rem;
-}
-
-.summary h2 {
-  color: #2c3e50;
-  margin-bottom: 1rem;
-}
-
-.stats {
+.summary-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 1rem;
-  margin-bottom: 2rem;
 }
 
-.stat-item {
-  background-color: white;
-  padding: 1.5rem;
-  border-radius: 8px;
-  text-align: center;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+.summary-card {
+  background: white;
+  border: 1px solid #e4e9ed;
+  border-radius: 12px;
+  padding: 1.25rem;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.04);
 }
 
-.stat-label {
-  display: block;
-  font-size: 0.875rem;
-  color: #666;
-  margin-bottom: 0.5rem;
+.summary-card.highlight {
+  background: linear-gradient(135deg, #e8f5e9 0%, #f6fffb 100%);
+  border-color: #c0e8cf;
 }
 
-.stat-value {
-  display: block;
-  font-size: 2rem;
-  font-weight: bold;
-  color: #42b883;
+.summary-card .label {
+  margin: 0;
+  color: #5f6b7a;
+  font-weight: 600;
+  font-size: 0.9rem;
 }
 
-.class-distribution h3 {
-  color: #2c3e50;
-  margin-bottom: 1rem;
+.summary-card .value {
+  font-size: 1.8rem;
+  font-weight: 700;
+  margin: 0.35rem 0;
+  color: #1f2d3d;
 }
 
-.chart {
-  background-color: white;
-  padding: 1rem;
-  border-radius: 8px;
+.summary-card .hint {
+  margin: 0;
+  color: #7a8795;
+  font-size: 0.9rem;
 }
 
-.chart-bar {
-  margin-bottom: 1rem;
+.image-section {
+  background: white;
+  border: 1px solid #e4e9ed;
+  border-radius: 12px;
+  padding: 1.25rem;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.04);
 }
 
-.bar-label {
-  font-size: 0.875rem;
-  color: #666;
-  margin-bottom: 0.25rem;
-  text-transform: capitalize;
-}
-
-.bar-wrapper {
+.section-header {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-}
-
-.bar-fill {
-  height: 24px;
-  background-color: #42b883;
-  border-radius: 4px;
-  transition: width 0.3s ease;
-  min-width: 2px;
-}
-
-.bar-count {
-  font-weight: bold;
-  color: #2c3e50;
-}
-
-.image-results h2 {
-  color: #2c3e50;
+  justify-content: space-between;
   margin-bottom: 1rem;
+}
+
+.section-header h2 {
+  margin: 0;
+  color: #1f2d3d;
 }
 
 .image-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 1.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1rem;
 }
 
-.result-item {
-  background-color: white;
-  border-radius: 8px;
+.image-card {
+  border: 1px solid #e4e9ed;
+  border-radius: 12px;
   overflow: hidden;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  cursor: pointer;
-  transition: transform 0.3s, box-shadow 0.3s;
+  background: #fdfefe;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.04);
+  display: flex;
+  flex-direction: column;
 }
 
-.result-item:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-}
-
-.result-image {
+.thumb {
   position: relative;
-  width: 100%;
-  height: 200px;
+  background: #eef4f8;
+  height: 180px;
+  overflow: hidden;
 }
 
-.result-image img {
+.thumb img {
   width: 100%;
   height: 100%;
   object-fit: cover;
 }
 
-.label-overlay {
+.badge {
   position: absolute;
-  top: 0.5rem;
-  right: 0.5rem;
-  background-color: rgba(66, 184, 131, 0.9);
+  top: 12px;
+  left: 12px;
+  padding: 0.35rem 0.65rem;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 0.8rem;
   color: white;
-  padding: 0.25rem 0.75rem;
-  border-radius: 4px;
-  font-size: 0.875rem;
-  font-weight: bold;
 }
 
-.result-info {
+.badge-graded {
+  background: #42b883;
+}
+
+.badge-pending {
+  background: #ff9800;
+}
+
+.card-body {
   padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
-.result-info h4 {
-  color: #2c3e50;
-  margin-bottom: 0.5rem;
-  font-size: 1rem;
+.card-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.card-title h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  color: #1f2d3d;
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.label-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
+.ratio {
+  background: #eef4f8;
+  color: #1f2d3d;
+  padding: 0.35rem 0.65rem;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 0.9rem;
 }
 
-.label-tag {
-  background-color: #e8f5e9;
-  color: #42b883;
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  font-weight: bold;
-  text-transform: capitalize;
+.progress {
+  position: relative;
+  height: 12px;
+  background: #f0f4f7;
+  border-radius: 999px;
+  overflow: hidden;
 }
 
-.no-labels-text {
-  color: #999;
-  font-style: italic;
-  font-size: 0.875rem;
+.progress-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  background: linear-gradient(90deg, #42b883, #2f9b6f);
+  transition: width 0.3s ease;
 }
 
-.actions {
+.progress-text {
+  margin-top: 0.15rem;
+  font-size: 0.85rem;
+  color: #5f6b7a;
+}
+
+.card-meta {
   display: flex;
   gap: 1rem;
-  justify-content: center;
   flex-wrap: wrap;
+  color: #5f6b7a;
+  font-size: 0.9rem;
 }
 
-.download-btn,
-.back-btn,
-.upload-btn {
-  padding: 0.75rem 1.5rem;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 1rem;
-  transition: background-color 0.3s;
+.card-meta strong {
+  color: #1f2d3d;
 }
 
-.download-btn {
-  background-color: #2196f3;
-  color: white;
+.label-table {
+  border: 1px solid #e4e9ed;
+  border-radius: 10px;
+  overflow: hidden;
 }
 
-.download-btn:hover {
-  background-color: #1976d2;
-}
-
-.back-btn {
-  background-color: #666;
-  color: white;
-}
-
-.back-btn:hover {
-  background-color: #555;
-}
-
-.upload-btn {
-  background-color: #42b883;
-  color: white;
-}
-
-.upload-btn:hover {
-  background-color: #35945d;
-}
-
-/* Modal Styles */
-.modal {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background-color: rgba(0, 0, 0, 0.8);
-  display: flex;
-  justify-content: center;
+.label-row {
+  display: grid;
+  grid-template-columns: 60px 1fr 1fr 110px;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
   align-items: center;
-  z-index: 1000;
 }
 
-.modal-content {
-  background-color: white;
-  border-radius: 8px;
-  padding: 2rem;
-  max-width: 800px;
-  max-height: 90vh;
-  overflow-y: auto;
-  position: relative;
+.label-row.header {
+  background: #f5f8fb;
+  font-weight: 700;
+  color: #1f2d3d;
 }
 
-.modal-close {
-  position: absolute;
-  top: 1rem;
-  right: 1rem;
-  background-color: #ff5252;
-  color: white;
-  border: none;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  font-size: 1.5rem;
-  cursor: pointer;
-  line-height: 1;
-  transition: background-color 0.3s;
+.label-row:not(.header) {
+  border-top: 1px solid #e4e9ed;
+  font-size: 0.95rem;
 }
 
-.modal-close:hover {
-  background-color: #d32f2f;
+.chip {
+  display: inline-block;
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 0.85rem;
 }
 
-.modal-content h3 {
-  color: #2c3e50;
-  margin-bottom: 1rem;
+.chip-correct {
+  background: #e8f5e9;
+  color: #2f9b6f;
 }
 
-.modal-image {
-  width: 100%;
-  max-height: 400px;
-  object-fit: contain;
-  border-radius: 4px;
-  margin-bottom: 1rem;
+.chip-wrong {
+  background: #fdecea;
+  color: #d93025;
 }
 
-.modal-labels h4 {
-  color: #2c3e50;
-  margin-bottom: 0.5rem;
+.chip-pending {
+  background: #fff7e6;
+  color: #c47c00;
 }
 
-.modal-label-item {
-  background-color: #f5f5f5;
-  padding: 0.75rem;
-  border-radius: 4px;
-  margin-bottom: 0.5rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
+.muted {
+  color: #7a8795;
 }
 
-.modal-label-class {
-  font-weight: bold;
-  color: #42b883;
-  text-transform: capitalize;
-}
+@media (max-width: 768px) {
+  .page-header {
+    flex-direction: column;
+  }
 
-.modal-label-coords {
-  font-size: 0.875rem;
-  color: #666;
+  .header-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .label-row {
+    grid-template-columns: 50px 1fr 1fr 100px;
+  }
 }
 </style>
