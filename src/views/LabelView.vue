@@ -129,6 +129,9 @@ import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../constants'
 
+const YOLO_ENDPOINT = import.meta.env.VITE_YOLO_ENDPOINT || 'http://140.115.54.239:8082/predict'
+const OCR_ENDPOINT = import.meta.env.VITE_OCR_ENDPOINT || 'http://140.115.54.239:8083/ocr'
+
 const DEFAULT_CLASS = '答案區'
 
 interface Label {
@@ -137,6 +140,9 @@ interface Label {
   y: number
   width: number
   height: number
+  recognizedAnswer?: string
+  expectedAnswer?: string
+  isCorrect?: boolean
 }
 
 interface ImageData {
@@ -146,6 +152,8 @@ interface ImageData {
   predictionsLoaded?: boolean
   isPredicting?: boolean
   predictionError?: string
+  isOcrRunning?: boolean
+  ocrError?: string
 }
 
 const router = useRouter()
@@ -338,7 +346,7 @@ const fetchPredictionsForCurrentImage = async () => {
     const image_base64 = base64.includes('base64,')
     ? base64.split('base64,')[1]
     : base64
-    const response = await fetch('/api/predict', {
+    const response = await fetch(YOLO_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -377,6 +385,7 @@ const fetchPredictionsForCurrentImage = async () => {
 
     img.labels = mappedLabels
     img.predictionsLoaded = true
+    await runOcrForImage(img)
     loadImage()
   } catch (error: any) {
     console.error('Error fetching predictions:', error)
@@ -432,6 +441,7 @@ const endDrawing = () => {
     currentImage.value.labels.push(label)
 
     loadImage()
+    runOcrForImage(currentImage.value)
   }
 }
 
@@ -554,11 +564,111 @@ const exportLabels = () => {
   URL.revokeObjectURL(url)
 }
 
+const RESULTS_STORAGE_KEY = 'results-page-data'
+
+const persistResultsForNextPage = () => {
+  const payload = images.value.map(img => {
+    const labels = img.labels || []
+    const correctCount = labels.filter((label: any) => label?.isCorrect === true).length
+    return {
+      name: img.name,
+      preview: img.preview,
+      labels,
+      totalLabels: labels.length,
+      correctCount
+    }
+  })
+  sessionStorage.setItem(RESULTS_STORAGE_KEY, JSON.stringify(payload))
+}
+
 const goToResults = () => {
+  persistResultsForNextPage()
   router.push({ 
     name: 'results',
     state: { images: images.value }
   })
+}
+
+const buildCanvasForImage = async (preview: string) => {
+  const baseImg = await loadPreviewImage(preview)
+  const offscreen = document.createElement('canvas')
+  offscreen.width = CANVAS_WIDTH
+  offscreen.height = CANVAS_HEIGHT
+  const ctx = offscreen.getContext('2d')
+  if (!ctx) return null
+
+  const { scale, offsetX, offsetY } = computeFit(baseImg.width, baseImg.height)
+  ctx.drawImage(baseImg, offsetX, offsetY, baseImg.width * scale, baseImg.height * scale)
+  return offscreen
+}
+
+const cropLabelToBase64 = (source: HTMLCanvasElement, label: Label) => {
+  if (label.width <= 0 || label.height <= 0) return null
+  const cropCanvas = document.createElement('canvas')
+  cropCanvas.width = Math.max(1, Math.floor(label.width))
+  cropCanvas.height = Math.max(1, Math.floor(label.height))
+  const ctx = cropCanvas.getContext('2d')
+  if (!ctx) return null
+
+  ctx.drawImage(
+    source,
+    label.x,
+    label.y,
+    label.width,
+    label.height,
+    0,
+    0,
+    cropCanvas.width,
+    cropCanvas.height
+  )
+
+  const dataUrl = cropCanvas.toDataURL('image/png')
+  return extractBase64FromPreview(dataUrl)
+}
+
+const runOcrForImage = async (img?: ImageData) => {
+  if (!img || img.isOcrRunning) return
+  if (!img.preview || !img.labels || img.labels.length === 0) return
+
+  const targets = img.labels.filter(label => !label.recognizedAnswer)
+  if (targets.length === 0) return
+
+  img.isOcrRunning = true
+  img.ocrError = undefined
+
+  try {
+    const sourceCanvas = await buildCanvasForImage(img.preview)
+    if (!sourceCanvas) throw new Error('Unable to prepare canvas for OCR')
+
+    for (const label of targets) {
+      const cropped = cropLabelToBase64(sourceCanvas, label)
+      if (!cropped) continue
+
+      const response = await fetch(OCR_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: cropped })
+      })
+
+      if (!response.ok) {
+        throw new Error(`OCR failed with status ${response.status}`)
+      }
+
+      const data = await response.json()
+      const text =
+        data?.text ||
+        data?.result ||
+        data?.prediction ||
+        data?.body?.json?.text ||
+        ''
+      label.recognizedAnswer = String(text)
+    }
+  } catch (error: any) {
+    console.error('OCR error:', error)
+    img.ocrError = error?.message || 'OCR 發生錯誤'
+  } finally {
+    img.isOcrRunning = false
+  }
 }
 </script>
 

@@ -2,8 +2,8 @@
   <div class="results-page">
     <div class="page-header">
       <div>
-        <p class="eyebrow">批改結果</p>
-        <h1>每張照片的正確率</h1>
+        <p class="eyebrow">Result</p>
+        <h1>每張的對比情形</h1>
         <p class="subtext">顯示 YOLO 標籤配對正確答案的數量，並快速回顧 OCR 辨識結果。</p>
       </div>
       <div class="header-actions">
@@ -21,34 +21,11 @@
     </div>
 
     <div v-else class="results-body">
-      <div class="summary-grid">
-        <div class="summary-card highlight">
-          <p class="label">總正確 / 總標籤</p>
-          <div class="value">{{ overallCorrect }} / {{ overallTotal }}</div>
-          <p class="hint">涵蓋 {{ scoredImages.length }} 張照片</p>
-        </div>
-        <div class="summary-card">
-          <p class="label">平均正確率</p>
-          <div class="value">{{ averageAccuracy }}%</div>
-          <p class="hint">只計算已批改的照片</p>
-        </div>
-        <div class="summary-card">
-          <p class="label">批改完成 / 全部</p>
-          <div class="value">{{ gradedCount }} / {{ scoredImages.length }}</div>
-          <p class="hint">未批改的照片顯示為「待批改」</p>
-        </div>
-        <div class="summary-card">
-          <p class="label">最高 / 最低正確率</p>
-          <div class="value">{{ maxAccuracy }}% / {{ minAccuracy }}%</div>
-          <p class="hint">以每張照片計算</p>
-        </div>
-      </div>
-
       <section class="image-section">
         <div class="section-header">
           <div>
-            <h2>照片批改列表</h2>
-            <p class="subtext">檢視每張照片的正確數量與錯誤標籤。</p>
+            <h2>Preview</h2>
+            <p class="subtext">「正確標籤數 / 標籤總數」。</p>
           </div>
         </div>
 
@@ -56,49 +33,47 @@
           <article v-for="img in scoredImages" :key="img.name" class="image-card">
             <div class="thumb">
               <img :src="img.preview || placeholderImage" :alt="img.name" />
-              <span class="badge" :class="img.graded ? 'badge-graded' : 'badge-pending'">
-                {{ img.graded ? '已批改' : '待批改' }}
-              </span>
+              <div class="overlay">
+                <span class="fraction">{{ img.correctCount }}/{{ img.totalLabels }}</span>
+                <span class="badge" :class="img.graded ? 'badge-graded' : 'badge-pending'">
+                  {{ img.graded ? '已批改' : '待批改' }}
+                </span>
+              </div>
+              <div class="box-layer" v-if="img.labels.length">
+                <div
+                  v-for="(label, idx) in img.labels"
+                  :key="idx"
+                  class="bbox"
+                  :class="label.isCorrect === true ? 'bbox-correct' : label.isCorrect === false ? 'bbox-wrong' : 'bbox-pending'"
+                  :style="boxStyle(label)"
+                ></div>
+              </div>
             </div>
             <div class="card-body">
               <div class="card-title">
                 <h3>{{ img.name }}</h3>
-                <span class="ratio">{{ img.correctCount }} / {{ img.totalLabels }}</span>
+                <span class="accuracy">{{ img.graded ? img.accuracy + '%' : '尚未批改' }}</span>
               </div>
-
-              <div class="progress">
-                <div class="progress-bar" :style="{ width: (img.graded ? img.accuracy : 0) + '%' }"></div>
-                <span class="progress-text">{{ img.graded ? img.accuracy + '%' : '尚未批改' }}</span>
+              <div v-if="img.labels.length" class="answers">
+                <div
+                  v-for="(label, idx) in img.labels"
+                  :key="idx"
+                  class="answer-row"
+                >
+                  <span class="answer-index">#{{ idx + 1 }}</span>
+                  <span class="answer-text">OCR：{{ label.recognizedAnswer || '—' }}</span>
+                  <span class="answer-text">正解：{{ label.expectedAnswer || '—' }}</span>
+                  <span class="answer-chip" :class="label.isCorrect ? 'chip-correct' : label.isCorrect === false ? 'chip-wrong' : 'chip-pending'">
+                    {{ label.isCorrect === undefined ? '未判定' : label.isCorrect ? '正確' : '錯誤' }}
+                  </span>
+                </div>
               </div>
-
               <div class="card-meta">
+                
                 <span>正確 <strong>{{ img.correctCount }}</strong></span>
                 <span>錯誤 <strong>{{ img.incorrectCount }}</strong></span>
                 <span>標籤總數 <strong>{{ img.totalLabels }}</strong></span>
               </div>
-
-              <div v-if="img.labels.length" class="label-table">
-                <div class="label-row header">
-                  <span>#</span>
-                  <span>預測答案</span>
-                  <span>正確答案</span>
-                  <span>結果</span>
-                </div>
-                <div v-for="(label, idx) in img.labels" :key="idx" class="label-row">
-                  <span class="muted">#{{ idx + 1 }}</span>
-                  <span>{{ label.recognizedAnswer || '—' }}</span>
-                  <span>{{ label.expectedAnswer || '—' }}</span>
-                  <span>
-                    <span
-                      class="chip"
-                      :class="label.isCorrect === true ? 'chip-correct' : label.isCorrect === false ? 'chip-wrong' : 'chip-pending'"
-                    >
-                      {{ label.isCorrect === undefined ? '未判定' : label.isCorrect ? '✔ 正確' : '✖ 錯誤' }}
-                    </span>
-                  </span>
-                </div>
-              </div>
-              <p v-else class="muted">此照片目前沒有標籤。</p>
             </div>
           </article>
         </div>
@@ -108,13 +83,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 interface LabelResult {
   recognizedAnswer?: string
   expectedAnswer?: string
   isCorrect?: boolean
+  x?: number
+  y?: number
+  width?: number
+  height?: number
 }
 
 interface IncomingImage {
@@ -139,6 +118,8 @@ const router = useRouter()
 const scoredImages = ref<NormalizedImage[]>([])
 const placeholderImage =
   'data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"200\" viewBox=\"0 0 320 200\" fill=\"none\"><rect width=\"320\" height=\"200\" rx=\"12\" fill=\"%23e8f5e9\"/><text x=\"50%\" y=\"50%\" dominant-baseline=\"middle\" text-anchor=\"middle\" font-family=\"Arial\" font-size=\"16\" fill=\"%23666\">預覽圖片</text></svg>'
+const BASE_CANVAS_WIDTH = 800
+const BASE_CANVAS_HEIGHT = 600
 
 const normalizeImage = (img: IncomingImage): NormalizedImage => {
   const labels = img.labels ?? []
@@ -164,86 +145,35 @@ const normalizeImage = (img: IncomingImage): NormalizedImage => {
   }
 }
 
+const STORAGE_KEY = 'results-page-data'
+
 const loadResultsFromState = () => {
   const state = history.state as { results?: IncomingImage[]; images?: IncomingImage[] }
   const payload = state?.results || state?.images
 
   if (payload && payload.length > 0) {
     scoredImages.value = payload.map(normalizeImage)
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
     return
   }
 
-  scoredImages.value = createSampleResults()
-}
-
-const createSampleResults = (): NormalizedImage[] => {
-  const samples: IncomingImage[] = [
-    {
-      name: 'exam-01.jpg',
-      correctCount: 14,
-      totalLabels: 20,
-      labels: [
-        { recognizedAnswer: 'A', expectedAnswer: 'A', isCorrect: true },
-        { recognizedAnswer: 'B', expectedAnswer: 'C', isCorrect: false },
-        { recognizedAnswer: 'D', expectedAnswer: 'D', isCorrect: true },
-        { recognizedAnswer: '未辨識', expectedAnswer: 'B', isCorrect: false }
-      ]
-    },
-    {
-      name: 'exam-02.jpg',
-      correctCount: 18,
-      totalLabels: 20,
-      labels: [
-        { recognizedAnswer: 'C', expectedAnswer: 'C', isCorrect: true },
-        { recognizedAnswer: 'B', expectedAnswer: 'B', isCorrect: true },
-        { recognizedAnswer: 'A', expectedAnswer: 'D', isCorrect: false }
-      ]
-    },
-    {
-      name: 'exam-03.jpg',
-      correctCount: 12,
-      totalLabels: 22,
-      labels: [
-        { recognizedAnswer: 'D', expectedAnswer: 'D', isCorrect: true },
-        { recognizedAnswer: 'B', expectedAnswer: 'B', isCorrect: true },
-        { recognizedAnswer: 'A', expectedAnswer: 'B', isCorrect: false }
-      ]
+  const cached = sessionStorage.getItem(STORAGE_KEY)
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached) as IncomingImage[]
+      scoredImages.value = parsed.map(normalizeImage)
+      return
+    } catch (err) {
+      console.warn('Unable to parse cached results', err)
     }
-  ]
+  }
 
-  return samples.map(normalizeImage)
+  scoredImages.value = []
 }
 
 onMounted(() => {
   loadResultsFromState()
 })
-
-const overallCorrect = computed(() =>
-  scoredImages.value.reduce((sum, img) => sum + (img.correctCount || 0), 0)
-)
-const overallTotal = computed(() =>
-  scoredImages.value.reduce((sum, img) => sum + (img.totalLabels || 0), 0)
-)
-
-const gradedAccuracies = computed(() =>
-  scoredImages.value
-    .filter(img => img.graded && img.totalLabels > 0)
-    .map(img => img.accuracy)
-)
-
-const averageAccuracy = computed(() => {
-  if (gradedAccuracies.value.length === 0) return '0.0'
-  const total = gradedAccuracies.value.reduce((sum, acc) => sum + acc, 0)
-  return (total / gradedAccuracies.value.length).toFixed(1)
-})
-
-const maxAccuracy = computed(() =>
-  gradedAccuracies.value.length ? Math.max(...gradedAccuracies.value) : 0
-)
-const minAccuracy = computed(() =>
-  gradedAccuracies.value.length ? Math.min(...gradedAccuracies.value) : 0
-)
-const gradedCount = computed(() => scoredImages.value.filter(img => img.graded).length)
 
 const goToLabel = () => {
   router.push({
@@ -254,6 +184,24 @@ const goToLabel = () => {
 
 const goToUpload = () => {
   router.push({ name: 'upload' })
+}
+
+const boxStyle = (label: LabelResult) => {
+  const x = label.x ?? 0
+  const y = label.y ?? 0
+  const w = label.width ?? 0
+  const h = label.height ?? 0
+  const left = (x / BASE_CANVAS_WIDTH) * 100
+  const top = (y / BASE_CANVAS_HEIGHT) * 100
+  const width = (w / BASE_CANVAS_WIDTH) * 100
+  const height = (h / BASE_CANVAS_HEIGHT) * 100
+
+  return {
+    left: `${left}%`,
+    top: `${top}%`,
+    width: `${width}%`,
+    height: `${height}%`
+  }
 }
 </script>
 
@@ -348,45 +296,6 @@ h1 {
   gap: 1.5rem;
 }
 
-.summary-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 1rem;
-}
-
-.summary-card {
-  background: white;
-  border: 1px solid #e4e9ed;
-  border-radius: 12px;
-  padding: 1.25rem;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.04);
-}
-
-.summary-card.highlight {
-  background: linear-gradient(135deg, #e8f5e9 0%, #f6fffb 100%);
-  border-color: #c0e8cf;
-}
-
-.summary-card .label {
-  margin: 0;
-  color: #5f6b7a;
-  font-weight: 600;
-  font-size: 0.9rem;
-}
-
-.summary-card .value {
-  font-size: 1.8rem;
-  font-weight: 700;
-  margin: 0.35rem 0;
-  color: #1f2d3d;
-}
-
-.summary-card .hint {
-  margin: 0;
-  color: #7a8795;
-  font-size: 0.9rem;
-}
-
 .image-section {
   background: white;
   border: 1px solid #e4e9ed;
@@ -409,8 +318,8 @@ h1 {
 
 .image-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.75rem;
 }
 
 .image-card {
@@ -426,7 +335,7 @@ h1 {
 .thumb {
   position: relative;
   background: #eef4f8;
-  height: 180px;
+  height: 220px;
   overflow: hidden;
 }
 
@@ -436,10 +345,50 @@ h1 {
   object-fit: cover;
 }
 
-.badge {
+.overlay {
   position: absolute;
-  top: 12px;
-  left: 12px;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: space-between;
+  padding: 12px;
+  pointer-events: none;
+}
+
+.box-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.bbox {
+  position: absolute;
+  border: 2px solid rgba(0, 0, 0, 0.4);
+  box-sizing: border-box;
+}
+
+.bbox-correct {
+  border-color: #2f9b6f;
+}
+
+.bbox-wrong {
+  border-color: #d93025;
+}
+
+.bbox-pending {
+  border-color: #ff9800;
+}
+
+.fraction {
+  background: rgba(31, 45, 61, 0.8);
+  color: white;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  font-weight: 700;
+}
+
+.badge {
   padding: 0.35rem 0.65rem;
   border-radius: 6px;
   font-weight: 700;
@@ -479,37 +428,13 @@ h1 {
   white-space: nowrap;
 }
 
-.ratio {
+.accuracy {
   background: #eef4f8;
   color: #1f2d3d;
-  padding: 0.35rem 0.65rem;
+  padding: 0.3rem 0.6rem;
   border-radius: 6px;
   font-weight: 700;
   font-size: 0.9rem;
-}
-
-.progress {
-  position: relative;
-  height: 12px;
-  background: #f0f4f7;
-  border-radius: 999px;
-  overflow: hidden;
-}
-
-.progress-bar {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 0;
-  background: linear-gradient(90deg, #42b883, #2f9b6f);
-  transition: width 0.3s ease;
-}
-
-.progress-text {
-  margin-top: 0.15rem;
-  font-size: 0.85rem;
-  color: #5f6b7a;
 }
 
 .card-meta {
@@ -524,37 +449,35 @@ h1 {
   color: #1f2d3d;
 }
 
-.label-table {
-  border: 1px solid #e4e9ed;
-  border-radius: 10px;
-  overflow: hidden;
+.answers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
 }
 
-.label-row {
+.answer-row {
   display: grid;
-  grid-template-columns: 60px 1fr 1fr 110px;
+  grid-template-columns: 70px 1fr 1fr 90px;
   gap: 0.5rem;
-  padding: 0.6rem 0.75rem;
   align-items: center;
+  font-size: 0.9rem;
 }
 
-.label-row.header {
-  background: #f5f8fb;
+.answer-index {
   font-weight: 700;
   color: #1f2d3d;
 }
 
-.label-row:not(.header) {
-  border-top: 1px solid #e4e9ed;
-  font-size: 0.95rem;
+.answer-text {
+  color: #4a5563;
 }
 
-.chip {
+.answer-chip {
   display: inline-block;
   padding: 0.25rem 0.5rem;
   border-radius: 999px;
   font-weight: 700;
-  font-size: 0.85rem;
+  text-align: center;
 }
 
 .chip-correct {
@@ -572,10 +495,6 @@ h1 {
   color: #c47c00;
 }
 
-.muted {
-  color: #7a8795;
-}
-
 @media (max-width: 768px) {
   .page-header {
     flex-direction: column;
@@ -584,10 +503,6 @@ h1 {
   .header-actions {
     width: 100%;
     justify-content: flex-start;
-  }
-
-  .label-row {
-    grid-template-columns: 50px 1fr 1fr 100px;
   }
 }
 </style>
