@@ -27,23 +27,37 @@
 
       <div class="main-area">
         <div class="image-display">
-          <canvas 
+          <canvas
             ref="canvas"
             @mousedown="startDrawing"
             @mousemove="draw"
             @mouseup="endDrawing"
             @mouseleave="endDrawing"
+            @wheel.prevent="handleWheel"
           ></canvas>
+          <div class="view-controls">
+            <div class="zoom-controls">
+              <button @click="changeZoom(0.1)">＋</button>
+              <span>{{ Math.round(zoom * 100) }}%</span>
+              <button @click="changeZoom(-0.1)">－</button>
+            </div>
+            <div class="pan-controls">
+              <button @click="nudgePan('up')">↑</button>
+              <div class="pan-middle">
+                <button @click="nudgePan('left')">←</button>
+                <button @click="resetView">重置</button>
+                <button @click="nudgePan('right')">→</button>
+              </div>
+              <button @click="nudgePan('down')">↓</button>
+            </div>
+            <p class="hint">按住 Alt 拖曳即可移動畫面</p>
+          </div>
         </div>
 
         <div class="controls">
-          <div class="class-selector">
-            <label>Object Class:</label>
-            <select v-model="currentClass">
-              <option v-for="cls in OBJECT_CLASSES" :key="cls" :value="cls">
-                {{ cls.charAt(0).toUpperCase() + cls.slice(1) }}
-              </option>
-            </select>
+          <div class="class-selector single-class">
+            <label>標註類型：</label>
+            <span class="single-class-label">{{ DEFAULT_CLASS }}</span>
           </div>
 
           <div class="label-list">
@@ -99,7 +113,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { CANVAS_WIDTH, CANVAS_HEIGHT, OBJECT_CLASSES } from '../constants'
+import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../constants'
+
+const DEFAULT_CLASS = '答案區'
 
 interface Label {
   class: string
@@ -122,12 +138,16 @@ const router = useRouter()
 const canvas = ref<HTMLCanvasElement | null>(null)
 const images = ref<ImageData[]>([])
 const currentImageIndex = ref(0)
-const currentClass = ref('person')
+const currentClass = ref(DEFAULT_CLASS)
 const isDrawing = ref(false)
+const isPanning = ref(false)
 const startX = ref(0)
 const startY = ref(0)
 const currentX = ref(0)
 const currentY = ref(0)
+const panX = ref(0)
+const panY = ref(0)
+const zoom = ref(1)
 
 const currentImage = computed(() => images.value[currentImageIndex.value])
 
@@ -153,13 +173,33 @@ watch(currentImageIndex, () => {
 })
 
 const handleImageChange = () => {
+  panX.value = 0
+  panY.value = 0
+  zoom.value = 1
   loadImage()
   fetchPredictionsForCurrentImage()
 }
 
+const computeFit = (imgWidth: number, imgHeight: number) => {
+  const scale = Math.min(CANVAS_WIDTH / imgWidth, CANVAS_HEIGHT / imgHeight)
+  const offsetX = (CANVAS_WIDTH - imgWidth * scale) / 2
+  const offsetY = (CANVAS_HEIGHT - imgHeight * scale) / 2
+
+  return { scale, offsetX, offsetY }
+}
+
+const loadPreviewImage = (preview: string) => {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = reject
+    img.src = preview
+  })
+}
+
 const loadImage = () => {
   if (!canvas.value || !currentImage.value) return
-  
+
   const ctx = canvas.value.getContext('2d')
   if (!ctx) return
 
@@ -168,15 +208,16 @@ const loadImage = () => {
     canvas.value!.width = CANVAS_WIDTH
     canvas.value!.height = CANVAS_HEIGHT
     ctx.clearRect(0, 0, canvas.value!.width, canvas.value!.height)
-    
-    // Draw image scaled to fit canvas
-    const scale = Math.min(CANVAS_WIDTH / img.width, CANVAS_HEIGHT / img.height)
-    const x = (CANVAS_WIDTH - img.width * scale) / 2
-    const y = (CANVAS_HEIGHT - img.height * scale) / 2
-    ctx.drawImage(img, x, y, img.width * scale, img.height * scale)
-    
+
+    const fit = computeFit(img.width, img.height)
+
+    ctx.save()
+    ctx.setTransform(zoom.value, 0, 0, zoom.value, panX.value, panY.value)
+    ctx.drawImage(img, fit.offsetX, fit.offsetY, img.width * fit.scale, img.height * fit.scale)
+
     // Draw existing labels
-    drawLabels()
+    drawLabels(ctx)
+    ctx.restore()
   }
   
   if (currentImage.value.preview) {
@@ -192,19 +233,16 @@ const loadImage = () => {
   }
 }
 
-const drawLabels = () => {
+const drawLabels = (ctx: CanvasRenderingContext2D) => {
   if (!canvas.value || !currentImage.value?.labels) return
-  
-  const ctx = canvas.value.getContext('2d')
-  if (!ctx) return
-  
+
   currentImage.value.labels.forEach((label) => {
     ctx.strokeStyle = '#42b883'
     ctx.lineWidth = 2
     ctx.strokeRect(label.x, label.y, label.width, label.height)
-    
+
     ctx.fillStyle = '#42b883'
-    ctx.fillRect(label.x, label.y - 20, label.class.length * 10 + 10, 20)
+    ctx.fillRect(label.x, label.y - 20, label.class.length * 10 + 20, 20)
     ctx.fillStyle = 'white'
     ctx.font = '14px Arial'
     ctx.fillText(label.class, label.x + 5, label.y - 5)
@@ -213,27 +251,39 @@ const drawLabels = () => {
 
 const startDrawing = (event: MouseEvent) => {
   if (!canvas.value) return
-  
-  const rect = canvas.value.getBoundingClientRect()
-  startX.value = event.clientX - rect.left
-  startY.value = event.clientY - rect.top
+
+  if (event.button !== 0 || event.altKey) {
+    startPan(event)
+    return
+  }
+
+  const { x, y } = getCanvasCoords(event)
+  startX.value = x
+  startY.value = y
   isDrawing.value = true
 }
 
 const draw = (event: MouseEvent) => {
+  if (isPanning.value) {
+    handlePanMove(event)
+    return
+  }
+
   if (!isDrawing.value || !canvas.value) return
-  
-  const rect = canvas.value.getBoundingClientRect()
-  currentX.value = event.clientX - rect.left
-  currentY.value = event.clientY - rect.top
-  
+
+  const { x, y } = getCanvasCoords(event)
+  currentX.value = x
+  currentY.value = y
+
   // Redraw image and existing labels
   loadImage()
-  
+
   // Draw current box
   const ctx = canvas.value.getContext('2d')
   if (!ctx) return
-  
+
+  ctx.save()
+  ctx.setTransform(zoom.value, 0, 0, zoom.value, panX.value, panY.value)
   ctx.strokeStyle = '#ff5252'
   ctx.lineWidth = 2
   ctx.strokeRect(
@@ -242,6 +292,7 @@ const draw = (event: MouseEvent) => {
     currentX.value - startX.value,
     currentY.value - startY.value
   )
+  ctx.restore()
 }
 
 const extractBase64FromPreview = (preview: string) => {
@@ -257,6 +308,8 @@ const fetchPredictionsForCurrentImage = async () => {
   img.predictionError = undefined
 
   try {
+    const previewImg = await loadPreviewImage(img.preview)
+    const { scale, offsetX, offsetY } = computeFit(previewImg.width, previewImg.height)
     const base64 = extractBase64FromPreview(img.preview)
     const response = await fetch('http://140.115.54.239:8082/predict', {
       method: 'POST',
@@ -275,13 +328,23 @@ const fetchPredictionsForCurrentImage = async () => {
 
     const mappedLabels: Label[] = detections.map((detection: any) => {
       const bbox = detection?.bbox || []
-      const [x, y, width, height] = bbox
+      const [x1, y1, x2, y2] = bbox
+      const normalizedX1 = Number(x1) || 0
+      const normalizedY1 = Number(y1) || 0
+      const normalizedX2 = Number(x2) || 0
+      const normalizedY2 = Number(y2) || 0
+
+      const boxX = normalizedX1 * scale + offsetX
+      const boxY = normalizedY1 * scale + offsetY
+      const boxWidth = (normalizedX2 - normalizedX1) * scale
+      const boxHeight = (normalizedY2 - normalizedY1) * scale
+
       return {
-        class: detection?.class || detection?.label || 'object',
-        x: Number(x) || 0,
-        y: Number(y) || 0,
-        width: Number(width) || 0,
-        height: Number(height) || 0
+        class: DEFAULT_CLASS,
+        x: boxX,
+        y: boxY,
+        width: boxWidth,
+        height: boxHeight
       }
     })
 
@@ -297,13 +360,18 @@ const fetchPredictionsForCurrentImage = async () => {
 }
 
 const endDrawing = () => {
+  if (isPanning.value) {
+    stopPan()
+    return
+  }
+
   if (!isDrawing.value || !currentImage.value) return
-  
+
   isDrawing.value = false
-  
+
   const width = currentX.value - startX.value
   const height = currentY.value - startY.value
-  
+
   // Only save if box is large enough
   if (Math.abs(width) > 10 && Math.abs(height) > 10) {
     const label: Label = {
@@ -313,12 +381,12 @@ const endDrawing = () => {
       width: Math.abs(width),
       height: Math.abs(height)
     }
-    
+
     if (!currentImage.value.labels) {
       currentImage.value.labels = []
     }
     currentImage.value.labels.push(label)
-    
+
     loadImage()
   }
 }
@@ -337,6 +405,66 @@ const clearLabels = () => {
     img.labels = []
     loadImage()
   }
+}
+
+const getCanvasCoords = (event: MouseEvent) => {
+  if (!canvas.value) return { x: 0, y: 0 }
+
+  const rect = canvas.value.getBoundingClientRect()
+  return {
+    x: (event.clientX - rect.left - panX.value) / zoom.value,
+    y: (event.clientY - rect.top - panY.value) / zoom.value
+  }
+}
+
+const startPan = (event: MouseEvent) => {
+  isPanning.value = true
+  startX.value = event.clientX
+  startY.value = event.clientY
+}
+
+const handlePanMove = (event: MouseEvent) => {
+  if (!isPanning.value) return
+
+  const dx = event.clientX - startX.value
+  const dy = event.clientY - startY.value
+
+  panX.value += dx
+  panY.value += dy
+
+  startX.value = event.clientX
+  startY.value = event.clientY
+
+  loadImage()
+}
+
+const stopPan = () => {
+  isPanning.value = false
+}
+
+const handleWheel = (event: WheelEvent) => {
+  changeZoom(event.deltaY < 0 ? 0.05 : -0.05)
+}
+
+const changeZoom = (delta: number) => {
+  zoom.value = Math.min(3, Math.max(0.2, zoom.value + delta))
+  loadImage()
+}
+
+const nudgePan = (direction: 'up' | 'down' | 'left' | 'right') => {
+  const step = 20
+  if (direction === 'up') panY.value -= step
+  if (direction === 'down') panY.value += step
+  if (direction === 'left') panX.value -= step
+  if (direction === 'right') panX.value += step
+  loadImage()
+}
+
+const resetView = () => {
+  panX.value = 0
+  panY.value = 0
+  zoom.value = 1
+  loadImage()
 }
 
 const selectImage = (index: number) => {
@@ -510,6 +638,7 @@ h1 {
   justify-content: center;
   align-items: center;
   overflow: hidden;
+  flex-direction: column;
 }
 
 canvas {
@@ -517,6 +646,63 @@ canvas {
   border: 2px solid #ddd;
   border-radius: 4px;
   background-color: white;
+}
+
+.view-controls {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+
+.zoom-controls,
+.pan-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.pan-controls {
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.pan-middle {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.view-controls button {
+  background-color: #42b883;
+  color: white;
+  border: none;
+  padding: 0.3rem 0.6rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.view-controls button:hover {
+  background-color: #35945d;
+}
+
+.view-controls .hint {
+  margin: 0;
+  color: #666;
+  font-size: 0.875rem;
+}
+
+.single-class {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.single-class-label {
+  background: #e8f5e9;
+  color: #2c3e50;
+  padding: 0.4rem 0.75rem;
+  border-radius: 4px;
+  font-weight: bold;
 }
 
 .controls {
