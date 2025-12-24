@@ -6,11 +6,11 @@ import { RouterLink, RouterView } from 'vue-router'
   <div id="app">
     <header>
       <div class="header-content">
-        <h1 class="app-title">🎓 Cram School - YOLO Image Labeling</h1>
+        <h1 class="app-title">🎓 補習班自動批改系統</h1>
         <nav>
-          <RouterLink to="/">📁 Upload</RouterLink>
-          <RouterLink to="/label">🏷️ Label</RouterLink>
-          <RouterLink to="/results">📊 Results</RouterLink>
+          <RouterLink to="/">📁 上傳</RouterLink>
+          <RouterLink to="/label">🏷️ 標註</RouterLink>
+          <RouterLink to="/results">📊 結果</RouterLink>
         </nav>
       </div>
     </header>
@@ -54,6 +54,7 @@ header {
 nav {
   display: flex;
   gap: 1rem;
+  margin-bottom: 0;
 }
 
 nav a {
@@ -94,6 +95,7 @@ main {
   nav {
     width: 100%;
     justify-content: space-between;
+    margin-bottom: 0;
   }
   
   nav a {

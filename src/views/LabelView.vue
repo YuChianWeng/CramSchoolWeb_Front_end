@@ -30,6 +30,11 @@
           <div class="image-display">
             <canvas
               ref="canvas"
+              :style="{ 
+                cursor: currentMode === 'pan' 
+                  ? (isPanning ? 'grabbing' : 'grab') 
+                  : 'crosshair' 
+              }"
               @mousedown="startDrawing"
               @mousemove="draw"
               @mouseup="endDrawing"
@@ -51,7 +56,6 @@
                 </div>
                 <button @click="nudgePan('down')">↓</button>
               </div>
-              <p class="hint">按住 Alt 拖曳即可移動畫面</p>
             </div>
             <div class="prediction-state" v-if="currentImage">
               <span v-if="currentImage.isPredicting" class="state loading">偵測中...</span>
@@ -65,6 +69,20 @@
           </div>
 
           <div class="controls">
+            <div class="mode-selector">
+              <label>操作模式：</label>
+              <div class="mode-buttons">
+                <button 
+                  :class="{ active: currentMode === 'draw' }" 
+                  @click="currentMode = 'draw'"
+                >✏️ 標註</button>
+                <button 
+                  :class="{ active: currentMode === 'pan' }" 
+                  @click="currentMode = 'pan'"
+                >✋ 拖移（或按住ALT）</button>
+              </div>
+            </div>
+
             <div class="class-selector single-class">
               <label>標註類型：</label>
               <span class="single-class-label">{{ DEFAULT_CLASS }}</span>
@@ -155,6 +173,8 @@ const currentImageIndex = ref(0)
 const currentClass = ref(DEFAULT_CLASS)
 const isDrawing = ref(false)
 const isPanning = ref(false)
+const currentMode = ref<'draw' | 'pan'>('draw') // 控制目前工具模式
+const isProcessingOCR = ref(false)
 const startX = ref(0)
 const startY = ref(0)
 const currentX = ref(0)
@@ -166,7 +186,6 @@ const zoom = ref(1)
 const currentImage = computed(() => images.value[currentImageIndex.value])
 
 onMounted(() => {
-  // Try to get images from router state
   const state = history.state as { files?: ImageData[] }
   if (state?.files && state.files.length > 0) {
     images.value = state.files.map(f => ({
@@ -180,7 +199,6 @@ onMounted(() => {
       handleImageChange()
     })
   } else {
-    // Load sample images for demonstration
     images.value = [
       { name: 'sample1.jpg', preview: '', labels: [], predictionsLoaded: false },
       { name: 'sample2.jpg', preview: '', labels: [], predictionsLoaded: false }
@@ -239,7 +257,6 @@ const loadImage = () => {
     ctx.setTransform(zoom.value, 0, 0, zoom.value, panX.value, panY.value)
     ctx.drawImage(img, fit.offsetX, fit.offsetY, img.width * fit.scale, img.height * fit.scale)
 
-    // Draw existing labels
     drawLabels(ctx)
     ctx.restore()
   }
@@ -247,7 +264,6 @@ const loadImage = () => {
   if (currentImage.value.preview) {
     img.src = currentImage.value.preview
   } else {
-    // Draw placeholder
     ctx.fillStyle = '#f0f0f0'
     ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT)
     ctx.fillStyle = '#666'
@@ -264,19 +280,21 @@ const drawLabels = (ctx: CanvasRenderingContext2D) => {
     ctx.strokeStyle = '#42b883'
     ctx.lineWidth = 2
     ctx.strokeRect(label.x, label.y, label.width, label.height)
-
+    /*
     ctx.fillStyle = '#42b883'
     ctx.fillRect(label.x, label.y - 20, label.class.length * 10 + 20, 20)
     ctx.fillStyle = 'white'
     ctx.font = '14px Arial'
     ctx.fillText(label.class, label.x + 5, label.y - 5)
+    */
   })
 }
 
 const startDrawing = (event: MouseEvent) => {
   if (!canvas.value) return
 
-  if (event.button !== 0 || event.altKey) {
+  // 如果是在拖移模式，或按住 Alt，或按非左鍵，則進入拖移邏輯
+  if (currentMode.value === 'pan' || event.button !== 0 || event.altKey) {
     startPan(event)
     return
   }
@@ -299,10 +317,8 @@ const draw = (event: MouseEvent) => {
   currentX.value = x
   currentY.value = y
 
-  // Redraw image and existing labels
   loadImage()
 
-  // Draw current box
   const ctx = canvas.value.getContext('2d')
   if (!ctx) return
 
@@ -338,7 +354,7 @@ const fetchPredictionsForCurrentImage = async () => {
     const image_base64 = base64.includes('base64,')
     ? base64.split('base64,')[1]
     : base64
-    const response = await fetch('/api/predict', {
+    const response = await fetch('/api/predict', { 
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -380,14 +396,7 @@ const fetchPredictionsForCurrentImage = async () => {
     loadImage()
   } catch (error: any) {
     console.error('Error fetching predictions:', error)
-    const message = error?.message || 'Unable to fetch predictions'
-    if (message.includes('Failed to fetch')) {
-      img.predictionError = '無法連線到偵測伺服器（可能是網路問題或瀏覽器阻擋 CORS）'
-    } else if (message.startsWith('Prediction failed with status')) {
-      img.predictionError = '偵測服務回應錯誤，請稍後再試或聯繫管理員'
-    } else {
-      img.predictionError = message
-    }
+    img.predictionError = error?.message || 'Unable to fetch predictions'
   } finally {
     img.isPredicting = false
   }
@@ -416,7 +425,6 @@ const endDrawing = () => {
   const width = currentX.value - startX.value
   const height = currentY.value - startY.value
 
-  // Only save if box is large enough
   if (Math.abs(width) > 10 && Math.abs(height) > 10) {
     const label: Label = {
       class: currentClass.value,
@@ -497,10 +505,10 @@ const changeZoom = (delta: number) => {
 
 const nudgePan = (direction: 'up' | 'down' | 'left' | 'right') => {
   const step = 20
-  if (direction === 'up') panY.value -= step
-  if (direction === 'down') panY.value += step
-  if (direction === 'left') panX.value -= step
-  if (direction === 'right') panX.value += step
+  if (direction === 'up') panY.value += step
+  if (direction === 'down') panY.value -= step
+  if (direction === 'left') panX.value += step
+  if (direction === 'right') panX.value -= step
   loadImage()
 }
 
@@ -532,7 +540,6 @@ const goToUpload = () => {
 }
 
 const exportLabels = () => {
-  // Convert labels to YOLO format
   const yoloData = images.value.map(img => {
     const labels = img.labels || []
     return {
@@ -544,7 +551,6 @@ const exportLabels = () => {
     }
   })
   
-  // Create and download JSON file
   const blob = new Blob([JSON.stringify(yoloData, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -554,17 +560,84 @@ const exportLabels = () => {
   URL.revokeObjectURL(url)
 }
 
-const goToResults = () => {
-  router.push({ 
-    name: 'results',
-    state: { images: images.value }
-  })
-}
+const goToResults = async () => {
+  if (!currentImage.value || isProcessingOCR.value) return;
+  
+  const img = currentImage.value;
+  const labels = img.labels || [];
+  
+  // 1. 取得乾淨的 Base64 
+  const base64Data = extractBase64FromPreview(img.preview);
+  
+  // 2. 準備座標轉換
+  const previewImg = await loadPreviewImage(img.preview);
+  const { scale, offsetX, offsetY } = computeFit(previewImg.width, previewImg.height);
+
+  // 3. 建立 inputPayload (input.json 的內容)
+  const inputPayload = {
+    image: base64Data,
+    annotations: labels.map(l => ({
+      class: l.class,
+      bbox: [
+        (l.x - offsetX) / scale,
+        (l.y - offsetY) / scale,
+        ((l.x - offsetX) / scale) + (l.width / scale),
+        ((l.y - offsetY) / scale) + (l.height / scale)
+      ]
+    }))
+  };
+
+  // --- 步驟 A: 強制下載 input.json ---
+  const inputBlob = new Blob([JSON.stringify(inputPayload, null, 2)], { type: 'application/json' });
+  const inputLink = document.createElement('a');
+  inputLink.href = URL.createObjectURL(inputBlob);
+  inputLink.download = `input.json`;
+  inputLink.click();
+  URL.revokeObjectURL(inputLink.href);
+
+  isProcessingOCR.value = true;
+  
+  try {
+    // 呼叫 API
+    const response = await fetch('/api/ocr_process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(inputPayload)
+    });
+
+    if (!response.ok) throw new Error(`API 錯誤: ${response.status}`);
+    
+    const resultData = await response.json(); // 這就是 output.json 的內容
+
+    // --- 步驟 B: 強制下載 output.json ---
+    const outputBlob = new Blob([JSON.stringify(resultData, null, 2)], { type: 'application/json' });
+    const outputLink = document.createElement('a');
+    outputLink.href = URL.createObjectURL(outputBlob);
+    outputLink.download = `output.json`;
+    outputLink.click();
+    URL.revokeObjectURL(outputLink.href);
+
+    // 4. 最後才跳轉頁面
+    router.push({ 
+      name: 'results', 
+      state: { 
+        ocrResults: resultData,
+        imageName: img.name 
+      } 
+    });
+
+  } catch (error: any) {
+    console.error('OCR 失敗:', error);
+    alert('辨識失敗，請檢查網路面板或後端 Log');
+  } finally {
+    isProcessingOCR.value = false;
+  }
+};
 </script>
 
 <style scoped>
 .label-container {
-  padding: 2rem;
+  padding: 1rem 2rem 2rem 2rem;
   height: calc(100vh - 4rem);
   overflow: hidden;
 }
@@ -572,7 +645,7 @@ const goToResults = () => {
 h1 {
   text-align: center;
   color: #2c3e50;
-  margin-bottom: 2rem;
+  margin-bottom: 1rem;
 }
 
 .no-images {
@@ -697,10 +770,10 @@ h1 {
 }
 
 canvas {
-  cursor: crosshair;
   border: 2px solid #ddd;
   border-radius: 4px;
   background-color: white;
+  transition: cursor 0.1s;
 }
 
 .view-controls {
@@ -795,20 +868,6 @@ canvas {
   cursor: not-allowed;
 }
 
-.single-class {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.single-class-label {
-  background: #e8f5e9;
-  color: #2c3e50;
-  padding: 0.4rem 0.75rem;
-  border-radius: 4px;
-  font-weight: bold;
-}
-
 .controls {
   background-color: #f5f5f5;
   border-radius: 8px;
@@ -817,6 +876,46 @@ canvas {
   max-width: 380px;
   height: 100%;
   overflow-y: auto;
+}
+
+/* 模式切換器專用樣式 */
+.mode-selector {
+  margin-bottom: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.mode-selector label {
+  font-weight: bold;
+  color: #2c3e50;
+}
+
+.mode-buttons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.mode-buttons button {
+  flex: 1;
+  padding: 0.6rem;
+  border: 2px solid #ddd;
+  background: white;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: bold;
+  transition: all 0.2s;
+}
+
+.mode-buttons button.active {
+  border-color: #42b883;
+  background-color: #e8f5e9;
+  color: #42b883;
+}
+
+.mode-buttons button:hover:not(.active) {
+  background-color: #f9f9f9;
+  border-color: #ccc;
 }
 
 .class-selector {
@@ -832,11 +931,12 @@ canvas {
   color: #2c3e50;
 }
 
-.class-selector select {
-  padding: 0.5rem;
-  border: 1px solid #ddd;
+.single-class-label {
+  background: #e8f5e9;
+  color: #2c3e50;
+  padding: 0.4rem 0.75rem;
   border-radius: 4px;
-  font-size: 1rem;
+  font-weight: bold;
 }
 
 .label-list {

@@ -252,13 +252,13 @@ const downloadJSON = () => {
 .results-container {
   max-width: 1400px;
   margin: 0 auto;
-  padding: 2rem;
+  padding: 1rem 2rem 2rem 2rem;
 }
 
 h1 {
   text-align: center;
   color: #2c3e50;
-  margin-bottom: 2rem;
+  margin-bottom: 1rem;
 }
 
 .no-results {
