@@ -131,6 +131,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { getResultsData } from '../stores/resultsStore'
 
 interface LabelResult {
   recognizedAnswer?: string
@@ -195,6 +196,12 @@ const normalizeImage = (img: IncomingImage): NormalizedImage => {
 const STORAGE_KEY = 'results-page-data'
 
 const loadResultsFromState = () => {
+  const cachedInMemory = getResultsData()
+  if (cachedInMemory && cachedInMemory.length > 0) {
+    scoredImages.value = cachedInMemory.map(normalizeImage)
+    return
+  }
+
   const state = history.state as { results?: IncomingImage[]; images?: IncomingImage[] }
   const payload = state?.results || state?.images
 

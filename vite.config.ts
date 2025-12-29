@@ -26,6 +26,11 @@ export default defineConfig({
         secure: false,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
+      '/ocr': {
+        target: 'http://140.115.54.239:8083',
+        changeOrigin: true,
+        secure: false,
+      },
     },
   },
 })

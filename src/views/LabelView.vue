@@ -113,9 +113,17 @@
             </div>
 
             <div class="action-buttons">
-              <button @click="clearLabels" class="clear-labels-btn">Clear Labels</button>
-              <button @click="exportLabels" class="export-btn">Export Labels</button>
-              <button @click="goToResults" class="results-btn">View Results</button>
+              <button type="button" @click="clearLabels" class="clear-labels-btn">Clear Labels</button>
+              <button type="button" @click="exportLabels" class="export-btn">Export Labels</button>
+              <div class="results-action">
+                <a
+                  :href="resultsHref"
+                  class="results-btn"
+                  role="button"
+                  @click="handleVerifyClick"
+                >Verify Labels</a>
+                <span v-if="isVerifying" class="loading-text">loading...</span>
+              </div>
             </div>
           </div>
         </div>
@@ -128,9 +136,15 @@
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../constants'
+import { setResultsData } from '../stores/resultsStore'
 
-const YOLO_ENDPOINT = import.meta.env.VITE_YOLO_ENDPOINT || 'http://140.115.54.239:8082/predict'
-const OCR_ENDPOINT = import.meta.env.VITE_OCR_ENDPOINT || 'http://140.115.54.239:8083/ocr'
+const YOLO_DEFAULT = '/api/predict'
+const OCR_DEFAULT = '/ocr'
+const YOLO_HARDCODE = 'http://140.115.54.239:8082/predict'
+const OCR_HARDCODE = 'http://140.115.54.239:8083/ocr'
+const YOLO_ENDPOINT = import.meta.env.VITE_YOLO_ENDPOINT || YOLO_DEFAULT
+const OCR_ENDPOINT = import.meta.env.VITE_OCR_ENDPOINT || OCR_DEFAULT
+const isPreviewPort = typeof window !== 'undefined' && window.location?.port === '4173'
 
 const DEFAULT_CLASS = '答案區'
 
@@ -163,6 +177,10 @@ const currentImageIndex = ref(0)
 const currentClass = ref(DEFAULT_CLASS)
 const isDrawing = ref(false)
 const isPanning = ref(false)
+const autoScanInProgress = ref(false)
+const REQUEST_TIMEOUT_MS = 15000
+let autoScanPromise: Promise<void> | null = null
+const isVerifying = ref(false)
 const startX = ref(0)
 const startY = ref(0)
 const currentX = ref(0)
@@ -172,6 +190,16 @@ const panY = ref(0)
 const zoom = ref(1)
 
 const currentImage = computed(() => images.value[currentImageIndex.value])
+const resultsHref = computed(() => {
+  const resolvedHref = router.resolve({ name: 'results' }).href
+  if (resolvedHref.includes('#')) return resolvedHref
+  return `#${resolvedHref.startsWith('/') ? resolvedHref : `/${resolvedHref}`}`
+})
+const allScansComplete = computed(
+  () =>
+    images.value.length > 0 &&
+    images.value.every((img) => Boolean(img.predictionsLoaded || img.predictionError))
+)
 
 onMounted(() => {
   // Try to get images from router state
@@ -186,6 +214,7 @@ onMounted(() => {
     }))
     nextTick(() => {
       handleImageChange()
+      void scanAllImages()
     })
   } else {
     // Load sample images for demonstration
@@ -195,6 +224,16 @@ onMounted(() => {
     ]
   }
 })
+
+watch(
+  () => images.value,
+  (nextImages) => {
+    if (nextImages.length > 0) {
+      void scanAllImages()
+    }
+  },
+  { deep: false }
+)
 
 watch(currentImageIndex, () => {
   handleImageChange()
@@ -332,8 +371,77 @@ const extractBase64FromPreview = (preview: string) => {
   return separatorIndex >= 0 ? preview.slice(separatorIndex + 1) : preview
 }
 
-const fetchPredictionsForCurrentImage = async () => {
-  const img = currentImage.value
+const fetchWithFallback = async (
+  endpoints: string[],
+  body: any,
+  timeoutMs = REQUEST_TIMEOUT_MS
+) => {
+  let lastError: any = null
+  const headers = { 'Content-Type': 'application/json' }
+
+  for (const endpoint of endpoints) {
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal
+      })
+
+      window.clearTimeout(timeoutId)
+      if (!response.ok) {
+        throw new Error(`Request failed (${response.status})`)
+      }
+
+      return await response.json()
+    } catch (err) {
+      window.clearTimeout(timeoutId)
+      lastError = err
+      console.warn(`Request to ${endpoint} failed, trying next fallback`, err)
+    }
+  }
+
+  throw lastError || new Error('All endpoints failed')
+}
+
+const toPixelBox = (
+  bbox: any[],
+  imgWidth: number,
+  imgHeight: number
+): { x1: number; y1: number; x2: number; y2: number } | null => {
+  if (!Array.isArray(bbox) || bbox.length < 4) return null
+
+  const [a, b, c, d] = bbox.map(Number)
+  if ([a, b, c, d].some(v => Number.isNaN(v))) return null
+
+  // Detect normalized inputs (0-1) and center-based ordering (cx, cy, w, h)
+  const looksNormalized = [a, b, c, d].every(v => v >= 0 && v <= 1.2)
+  const looksCenterBased = looksNormalized && c <= 1.2 && d <= 1.2
+
+  if (looksCenterBased) {
+    const cx = a * imgWidth
+    const cy = b * imgHeight
+    const w = c * imgWidth
+    const h = d * imgHeight
+    return {
+      x1: cx - w / 2,
+      y1: cy - h / 2,
+      x2: cx + w / 2,
+      y2: cy + h / 2
+    }
+  }
+
+  const x1 = looksNormalized ? a * imgWidth : a
+  const y1 = looksNormalized ? b * imgHeight : b
+  const x2 = looksNormalized ? c * imgWidth : c
+  const y2 = looksNormalized ? d * imgHeight : d
+
+  return { x1, y1, x2, y2 }
+}
+
+const fetchPredictionsForImage = async (img?: ImageData) => {
   if (!img || !img.preview || img.isPredicting || img.predictionsLoaded) return
 
   img.isPredicting = true
@@ -346,60 +454,102 @@ const fetchPredictionsForCurrentImage = async () => {
     const image_base64 = base64.includes('base64,')
     ? base64.split('base64,')[1]
     : base64
-    const response = await fetch(YOLO_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ image_base64 })
-    })
+    const yoloEndpoints = Array.from(
+      new Set(
+        isPreviewPort
+          ? [YOLO_HARDCODE, YOLO_ENDPOINT, YOLO_DEFAULT]
+          : [YOLO_ENDPOINT, YOLO_DEFAULT, YOLO_HARDCODE]
+      )
+    )
+    const data = await fetchWithFallback(yoloEndpoints, { image_base64 })
+    const detections =
+      data?.detections ||
+      data?.predictions ||
+      data?.boxes ||
+      data?.results ||
+      data?.body?.json?.detections ||
+      data?.body?.json?.predictions ||
+      []
 
-    if (!response.ok) {
-      throw new Error(`Prediction failed with status ${response.status}`)
-    }
+    const mappedLabels: Label[] = detections
+      .map((detection: any) => {
+        const rawBox =
+          detection?.bbox ||
+          detection?.box ||
+          [detection?.x1, detection?.y1, detection?.x2, detection?.y2]
+        const pixelBox = toPixelBox(rawBox, previewImg.width, previewImg.height)
+        if (!pixelBox) return null
 
-    const data = await response.json()
-    const detections = data?.detections || data?.body?.json?.detections || []
+        const { x1, y1, x2, y2 } = pixelBox
+        const boxX = Math.max(0, Math.min(x1, x2) * scale + offsetX)
+        const boxY = Math.max(0, Math.min(y1, y2) * scale + offsetY)
+        const boxWidth = Math.abs(x2 - x1) * scale
+        const boxHeight = Math.abs(y2 - y1) * scale
 
-    const mappedLabels: Label[] = detections.map((detection: any) => {
-      const bbox = detection?.bbox || []
-      const [x1, y1, x2, y2] = bbox
-      const normalizedX1 = Number(x1) || 0
-      const normalizedY1 = Number(y1) || 0
-      const normalizedX2 = Number(x2) || 0
-      const normalizedY2 = Number(y2) || 0
-
-      const boxX = Math.max(0, normalizedX1 * scale + offsetX)
-      const boxY = Math.max(0, normalizedY1 * scale + offsetY)
-      const boxWidth = Math.abs(normalizedX2 - normalizedX1) * scale
-      const boxHeight = Math.abs(normalizedY2 - normalizedY1) * scale
-
-      return {
-        class: DEFAULT_CLASS,
-        x: boxX,
-        y: boxY,
-        width: boxWidth,
-        height: boxHeight
-      }
-    })
+        return {
+          class: detection?.class || detection?.label || detection?.name || DEFAULT_CLASS,
+          x: boxX,
+          y: boxY,
+          width: boxWidth,
+          height: boxHeight
+        }
+      })
+      .filter((v): v is Label => Boolean(v))
 
     img.labels = mappedLabels
     img.predictionsLoaded = true
-    await runOcrForImage(img)
-    loadImage()
+    if (currentImage.value === img) {
+      loadImage()
+    }
+    runOcrForImage(img)
   } catch (error: any) {
     console.error('Error fetching predictions:', error)
     const message = error?.message || 'Unable to fetch predictions'
-    if (message.includes('Failed to fetch')) {
-      img.predictionError = '無法連線到偵測伺服器（可能是網路問題或瀏覽器阻擋 CORS）'
-    } else if (message.startsWith('Prediction failed with status')) {
-      img.predictionError = '偵測服務回應錯誤，請稍後再試或聯繫管理員'
+    if (message.includes('Failed to fetch') || message.includes('CORS')) {
+      img.predictionError = 'Prediction blocked by network/CORS. Please use the proxied endpoint (/api/predict) or set VITE_YOLO_ENDPOINT.'
+    } else if (message.startsWith('Request failed (')) {
+      img.predictionError = 'Prediction failed with server error. Please retry or contact admin.'
     } else {
       img.predictionError = message
     }
   } finally {
     img.isPredicting = false
   }
+}
+
+const fetchPredictionsForCurrentImage = async () => {
+  const img = currentImage.value
+  return fetchPredictionsForImage(img)
+}
+
+const scanAllImages = async () => {
+  if (autoScanPromise) return autoScanPromise
+  autoScanInProgress.value = true
+  autoScanPromise = (async () => {
+    const queue = images.value.filter(
+      (img) => img.preview && !img.predictionsLoaded && !img.isPredicting
+    )
+    if (queue.length === 0) return
+
+    const maxWorkers = Math.min(3, queue.length)
+    let cursor = 0
+    const worker = async () => {
+      while (cursor < queue.length) {
+        const target = queue[cursor]
+        cursor += 1
+        await fetchPredictionsForImage(target)
+      }
+    }
+
+    const workers = Array.from({ length: maxWorkers }, () => worker())
+    await Promise.all(workers)
+  })()
+    .finally(() => {
+      autoScanInProgress.value = false
+      autoScanPromise = null
+    })
+
+  return autoScanPromise
 }
 
 const retryPrediction = () => {
@@ -578,15 +728,31 @@ const persistResultsForNextPage = () => {
       correctCount
     }
   })
-  sessionStorage.setItem(RESULTS_STORAGE_KEY, JSON.stringify(payload))
+  setResultsData(payload)
+  try {
+    sessionStorage.setItem(RESULTS_STORAGE_KEY, JSON.stringify(payload))
+  } catch (err) {
+    console.warn('Unable to persist results to sessionStorage', err)
+  }
 }
 
-const goToResults = () => {
-  persistResultsForNextPage()
-  router.push({ 
-    name: 'results',
-    state: { images: images.value }
-  })
+const handleVerifyClick = async (event: MouseEvent) => {
+  event.preventDefault()
+  if (isVerifying.value) return
+  isVerifying.value = true
+  try {
+    if (!allScansComplete.value) {
+      await scanAllImages()
+    }
+    try {
+      persistResultsForNextPage()
+    } catch (err) {
+      console.warn('Unable to persist results for next page', err)
+    }
+    window.location.assign(resultsHref.value || '/#/results')
+  } finally {
+    isVerifying.value = false
+  }
 }
 
 const buildCanvasForImage = async (preview: string) => {
@@ -644,17 +810,14 @@ const runOcrForImage = async (img?: ImageData) => {
       const cropped = cropLabelToBase64(sourceCanvas, label)
       if (!cropped) continue
 
-      const response = await fetch(OCR_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: cropped })
-      })
-
-      if (!response.ok) {
-        throw new Error(`OCR failed with status ${response.status}`)
-      }
-
-      const data = await response.json()
+      const ocrEndpoints = Array.from(
+        new Set(
+          isPreviewPort
+            ? [OCR_HARDCODE, OCR_ENDPOINT, OCR_DEFAULT]
+            : [OCR_ENDPOINT, OCR_DEFAULT, OCR_HARDCODE]
+        )
+      )
+      const data = await fetchWithFallback(ocrEndpoints, { image: cropped })
       const text =
         data?.text ||
         data?.result ||
@@ -1079,6 +1242,19 @@ canvas {
 .results-btn {
   background-color: #42b883;
   color: white;
+  text-decoration: none;
+}
+
+.results-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.loading-text {
+  color: #9aa3ad;
+  font-size: 0.9rem;
 }
 
 .results-btn:hover {

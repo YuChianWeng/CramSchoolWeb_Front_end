@@ -23,6 +23,18 @@
       </div>
     </div>
 
+    <div class="action-buttons top-actions">
+      <button @click="clearAll" class="clear-btn">Clear All</button>
+      <button
+        @click="uploadFiles"
+        class="upload-btn"
+        :disabled="isUploading || selectedFiles.length === 0"
+      >
+        {{ isUploading ? 'Uploading...' : 'Upload & Label' }}
+      </button>
+    </div>
+    <p v-if="isUploading" class="loading-text">loading...</p>
+
     <div v-if="selectedFiles.length > 0" class="file-list">
       <h2>Selected Images ({{ selectedFiles.length }})</h2>
       <div class="file-grid">
@@ -31,12 +43,6 @@
           <p class="file-name">{{ file.name }}</p>
           <button @click="removeFile(index)" class="remove-btn">Remove</button>
         </div>
-      </div>
-      <div class="action-buttons">
-        <button @click="clearAll" class="clear-btn">Clear All</button>
-        <button @click="uploadFiles" class="upload-btn" :disabled="isUploading">
-          {{ isUploading ? 'Uploading...' : 'Upload & Label' }}
-        </button>
       </div>
     </div>
   </div>
@@ -245,6 +251,18 @@ h1 {
   display: flex;
   gap: 1rem;
   justify-content: center;
+}
+
+.top-actions {
+  margin-top: 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.loading-text {
+  margin: 0 0 1rem;
+  text-align: center;
+  color: #9aa3ad;
+  font-size: 0.9rem;
 }
 
 .clear-btn,
