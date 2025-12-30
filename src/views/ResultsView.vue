@@ -144,6 +144,7 @@ interface ImageData {
 const router = useRouter()
 const images = ref<ImageData[]>([])
 const selectedImage = ref<number | null>(null)
+const savedImages = ref<any[]>([]); // ✅ 加上類型定義，避免後續使用報錯
 
 onMounted(() => {
   // Try to get images from router state
@@ -186,10 +187,12 @@ const closeModal = () => {
 }
 
 const goToLabel = () => {
-  router.push({ 
-    name: 'label',
-    state: { files: images.value }
-  })
+  router.push({
+    name: 'label', 
+    state: {
+      files: savedImages.value
+    }
+  });
 }
 
 const goToUpload = () => {

@@ -98,13 +98,28 @@
                   v-for="(label, index) in currentImage.labels"
                   :key="index"
                   class="label-item"
+                  :class="{ 'selected': index === selectedLabelIndex }"
+                  @click="focusLabelInput(index)"
                 >
-                  <span class="label-class">{{ label.class }}</span>
-                  <span class="label-coords">
-                    ({{ Math.round(label.x) }}, {{ Math.round(label.y) }},
-                     {{ Math.round(label.width) }}×{{ Math.round(label.height) }})
-                  </span>
-                  <button @click="removeLabel(index)" class="remove-label-btn">×</button>
+                  <button @click.stop="removeLabel(index)" class="remove-label-btn">×</button>
+
+                  <div class="label-content-row">
+                    <span class="label-name" :class="{ 'text-red': index === selectedLabelIndex }">
+                      {{ label.class }} ({{ index + 1 }})
+                    </span>
+
+                    <div class="label-input-group">
+                      <span class="input-prefix">答:</span>
+                      <input 
+                        type="text" 
+                        v-model="label.answer" 
+                        maxlength="4"
+                        :ref="(el) => { if(el) inputRefs[index] = el as HTMLInputElement }"
+                        @focus="selectLabel(index)"
+                        @click.stop
+                      />
+                    </div>
+                  </div>
                 </div>
               </div>
               <p v-else class="no-labels">No labels yet. Draw boxes on the image.</p>
@@ -155,6 +170,7 @@ interface Label {
   y: number
   width: number
   height: number
+  answer?: string // 儲存老師輸入的答案
 }
 
 interface ImageData {
@@ -173,7 +189,7 @@ const currentImageIndex = ref(0)
 const currentClass = ref(DEFAULT_CLASS)
 const isDrawing = ref(false)
 const isPanning = ref(false)
-const currentMode = ref<'draw' | 'pan'>('draw') // 控制目前工具模式
+const currentMode = ref<'draw' | 'pan'>('draw')
 const isProcessingOCR = ref(false)
 const startX = ref(0)
 const startY = ref(0)
@@ -182,6 +198,12 @@ const currentY = ref(0)
 const panX = ref(0)
 const panY = ref(0)
 const zoom = ref(1)
+
+// 追蹤目前被選取的標籤索引 (-1 表示未選取)
+const selectedLabelIndex = ref<number>(-1)
+
+// [新增] 用來存放所有輸入框的 DOM 元素，讓我們可以程式化控制焦點
+const inputRefs = ref<HTMLInputElement[]>([])
 
 const currentImage = computed(() => images.value[currentImageIndex.value])
 
@@ -211,6 +233,8 @@ watch(currentImageIndex, () => {
 })
 
 const handleImageChange = () => {
+  selectedLabelIndex.value = -1 // 切換圖片時重置選取狀態
+  inputRefs.value = [] // 重置 refs 陣列
   panX.value = 0
   panY.value = 0
   zoom.value = 1
@@ -276,30 +300,70 @@ const loadImage = () => {
 const drawLabels = (ctx: CanvasRenderingContext2D) => {
   if (!canvas.value || !currentImage.value?.labels) return
 
-  currentImage.value.labels.forEach((label) => {
-    ctx.strokeStyle = '#42b883'
-    ctx.lineWidth = 2
+  currentImage.value.labels.forEach((label, index) => {
+    // 根據是否被選取改變顏色
+    const isSelected = index === selectedLabelIndex.value
+    ctx.strokeStyle = isSelected ? '#ff5252' : '#42b883'
+    ctx.lineWidth = isSelected ? 3 : 2
+    
     ctx.strokeRect(label.x, label.y, label.width, label.height)
-    /*
-    ctx.fillStyle = '#42b883'
-    ctx.fillRect(label.x, label.y - 20, label.class.length * 10 + 20, 20)
-    ctx.fillStyle = 'white'
-    ctx.font = '14px Arial'
-    ctx.fillText(label.class, label.x + 5, label.y - 5)
-    */
   })
+}
+
+// 核心函式：強制聚焦指定的輸入框，這會觸發 @focus 進而更新 selectedLabelIndex
+const focusLabelInput = (index: number) => {
+  nextTick(() => {
+    const inputEl = inputRefs.value[index]
+    if (inputEl) {
+      inputEl.focus()
+    }
+  })
+}
+
+// 這裡被 @focus 呼叫，負責更新資料狀態與重繪
+const selectLabel = (index: number) => {
+  if (selectedLabelIndex.value !== index) {
+    selectedLabelIndex.value = index
+    loadImage()
+  }
 }
 
 const startDrawing = (event: MouseEvent) => {
   if (!canvas.value) return
 
-  // 如果是在拖移模式，或按住 Alt，或按非左鍵，則進入拖移邏輯
   if (currentMode.value === 'pan' || event.button !== 0 || event.altKey) {
     startPan(event)
     return
   }
 
   const { x, y } = getCanvasCoords(event)
+
+  // 碰撞偵測 - 檢查是否點擊到現有的框
+  const labels = currentImage.value?.labels || []
+  let hitIndex = -1
+  // 反向遍歷，確保優先選取最上層的框
+  for (let i = labels.length - 1; i >= 0; i--) {
+    const l = labels[i]
+    if (!l) continue // 防呆
+    if (x >= l.x && x <= l.x + l.width && y >= l.y && y <= l.y + l.height) {
+      hitIndex = i
+      break
+    }
+  }
+
+  if (hitIndex !== -1) {
+    // 點擊到框框：聚焦對應輸入框 (會自動觸發變色)
+    focusLabelInput(hitIndex)
+    return
+  } else {
+    // 點擊空白處：如果有選取則取消選取
+    if (selectedLabelIndex.value !== -1) {
+      selectedLabelIndex.value = -1
+      loadImage()
+    }
+  }
+
+  // 沒點到框框，開始畫新框
   startX.value = x
   startY.value = y
   isDrawing.value = true
@@ -333,6 +397,64 @@ const draw = (event: MouseEvent) => {
     currentY.value - startY.value
   )
   ctx.restore()
+}
+
+const endDrawing = () => {
+  if (isPanning.value) {
+    stopPan()
+    return
+  }
+
+  if (!isDrawing.value || !currentImage.value) return
+
+  isDrawing.value = false
+
+  const width = currentX.value - startX.value
+  const height = currentY.value - startY.value
+
+  if (Math.abs(width) > 10 && Math.abs(height) > 10) {
+    const label: Label = {
+      class: currentClass.value,
+      x: Math.min(startX.value, currentX.value),
+      y: Math.min(startY.value, currentY.value),
+      width: Math.abs(width),
+      height: Math.abs(height),
+      answer: '' // 初始化答案
+    }
+
+    if (!currentImage.value.labels) {
+      currentImage.value.labels = []
+    }
+    currentImage.value.labels.push(label)
+    
+    // 畫完新框後，自動聚焦到新框的輸入欄位
+    focusLabelInput(currentImage.value.labels.length - 1)
+    
+    loadImage()
+  }
+}
+
+const removeLabel = (index: number) => {
+  const img = currentImage.value
+  if (img && img.labels) {
+    img.labels.splice(index, 1)
+    // 刪除後調整選取狀態
+    if (selectedLabelIndex.value === index) {
+      selectedLabelIndex.value = -1
+    } else if (selectedLabelIndex.value > index) {
+      selectedLabelIndex.value--
+    }
+    loadImage()
+  }
+}
+
+const clearLabels = () => {
+  const img = currentImage.value
+  if (img && img.labels) {
+    img.labels = []
+    selectedLabelIndex.value = -1
+    loadImage()
+  }
 }
 
 const extractBase64FromPreview = (preview: string) => {
@@ -387,7 +509,8 @@ const fetchPredictionsForCurrentImage = async () => {
         x: boxX,
         y: boxY,
         width: boxWidth,
-        height: boxHeight
+        height: boxHeight,
+        answer: ''
       }
     })
 
@@ -409,54 +532,8 @@ const retryPrediction = () => {
   img.predictionsLoaded = false
   img.predictionError = undefined
   img.labels = []
+  selectedLabelIndex.value = -1
   fetchPredictionsForCurrentImage()
-}
-
-const endDrawing = () => {
-  if (isPanning.value) {
-    stopPan()
-    return
-  }
-
-  if (!isDrawing.value || !currentImage.value) return
-
-  isDrawing.value = false
-
-  const width = currentX.value - startX.value
-  const height = currentY.value - startY.value
-
-  if (Math.abs(width) > 10 && Math.abs(height) > 10) {
-    const label: Label = {
-      class: currentClass.value,
-      x: Math.min(startX.value, currentX.value),
-      y: Math.min(startY.value, currentY.value),
-      width: Math.abs(width),
-      height: Math.abs(height)
-    }
-
-    if (!currentImage.value.labels) {
-      currentImage.value.labels = []
-    }
-    currentImage.value.labels.push(label)
-
-    loadImage()
-  }
-}
-
-const removeLabel = (index: number) => {
-  const img = currentImage.value
-  if (img && img.labels) {
-    img.labels.splice(index, 1)
-    loadImage()
-  }
-}
-
-const clearLabels = () => {
-  const img = currentImage.value
-  if (img && img.labels) {
-    img.labels = []
-    loadImage()
-  }
 }
 
 const getCanvasCoords = (event: MouseEvent) => {
@@ -546,7 +623,8 @@ const exportLabels = () => {
       image: img.name,
       annotations: labels.map(label => ({
         class: label.class,
-        bbox: [label.x, label.y, label.width, label.height]
+        bbox: [label.x, label.y, label.width, label.height],
+        answer: label.answer || '' // 包含答案
       }))
     }
   })
@@ -566,18 +644,15 @@ const goToResults = async () => {
   const img = currentImage.value;
   const labels = img.labels || [];
   
-  // 1. 取得乾淨的 Base64 
   const base64Data = extractBase64FromPreview(img.preview);
-  
-  // 2. 準備座標轉換
   const previewImg = await loadPreviewImage(img.preview);
   const { scale, offsetX, offsetY } = computeFit(previewImg.width, previewImg.height);
 
-  // 3. 建立 inputPayload (input.json 的內容)
   const inputPayload = {
     image: base64Data,
     annotations: labels.map(l => ({
       class: l.class,
+      answer: l.answer || '', // 傳遞答案給後端
       bbox: [
         (l.x - offsetX) / scale,
         (l.y - offsetY) / scale,
@@ -587,7 +662,6 @@ const goToResults = async () => {
     }))
   };
 
-  // --- 步驟 A: 強制下載 input.json ---
   const inputBlob = new Blob([JSON.stringify(inputPayload, null, 2)], { type: 'application/json' });
   const inputLink = document.createElement('a');
   inputLink.href = URL.createObjectURL(inputBlob);
@@ -598,7 +672,6 @@ const goToResults = async () => {
   isProcessingOCR.value = true;
   
   try {
-    // 呼叫 API
     const response = await fetch('/api/ocr_process', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -607,9 +680,8 @@ const goToResults = async () => {
 
     if (!response.ok) throw new Error(`API 錯誤: ${response.status}`);
     
-    const resultData = await response.json(); // 這就是 output.json 的內容
+    const resultData = await response.json(); 
 
-    // --- 步驟 B: 強制下載 output.json ---
     const outputBlob = new Blob([JSON.stringify(resultData, null, 2)], { type: 'application/json' });
     const outputLink = document.createElement('a');
     outputLink.href = URL.createObjectURL(outputBlob);
@@ -617,7 +689,6 @@ const goToResults = async () => {
     outputLink.click();
     URL.revokeObjectURL(outputLink.href);
 
-    // 4. 最後才跳轉頁面
     router.push({ 
       name: 'results', 
       state: { 
@@ -955,45 +1026,108 @@ canvas {
   padding-right: 0.25rem;
 }
 
+/* ----- 修改後的 Label Item 樣式 (單行整合版 + 大字體) ----- */
+
 .label-item {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem;
+  position: relative; /* 為了讓絕對定位的叉叉按鈕參考 */
+  display: block; /* 改為 block 方便內部 flex 排版 */
+  padding: 1rem 0.75rem; /* 加大上下 padding，讓點擊區域更舒適 */
   background-color: white;
-  border-radius: 4px;
-  margin-bottom: 0.5rem;
+  border-radius: 6px;
+  margin-bottom: 0.75rem; /* 增加間距 */
+  border: 2px solid transparent; /* 預留邊框位置 */
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.08); /* 稍微加深陰影 */
 }
 
-.label-class {
+/* 選取時的樣式 */
+.label-item.selected {
+  border-color: #ff5252;
+  background-color: #fff5f5; /* 淡淡的紅色背景 */
+}
+
+/* 單行排版容器：名稱在左，輸入框在右 */
+.label-content-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between; /* 左右撐開 */
+  margin-right: 32px; /* 右側預留空間給垂直置中的刪除按鈕 */
+}
+
+/* 標籤名稱：字體放大 */
+.label-name {
   font-weight: bold;
+  font-size: 1.2rem; /* 字體放大 */
   color: #42b883;
 }
 
-.label-coords {
-  font-size: 0.875rem;
-  color: #666;
-  flex: 1;
-  text-align: right;
+/* 選取時文字變紅 */
+.label-name.text-red {
+  color: #d32f2f;
 }
 
+/* 輸入框群組 (包含 "答:" 字樣) */
+.label-input-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.input-prefix {
+  font-size: 1rem;
+  font-weight: bold;
+  color: #2c3e50;
+}
+
+/* 輸入框樣式：字體放大、框加大 */
+.label-input-group input {
+  width: 70px; /* 寬度加寬 */
+  padding: 4px 8px;
+  border: 2px solid #ddd;
+  border-radius: 6px;
+  outline: none;
+  font-size: 1.2rem; /* 輸入字體放大 */
+  text-align: center;
+  color: #2c3e50; 
+  font-weight: bold;
+  background-color: #f9f9f9;
+}
+
+.label-input-group input:focus {
+  border-color: #42b883;
+  background-color: #fff;
+  box-shadow: 0 0 0 3px rgba(66, 184, 131, 0.15);
+}
+
+/* 刪除按鈕：垂直置中 */
 .remove-label-btn {
-  background-color: #ff5252;
-  color: white;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%); /* 垂直置中修正 */
+  right: 8px;
+  
+  background-color: transparent;
+  color: #bbb;
   border: none;
-  width: 24px;
-  height: 24px;
+  width: 32px; /* 按鈕範圍加大 */
+  height: 32px;
   border-radius: 50%;
   cursor: pointer;
-  font-size: 1.2rem;
+  font-size: 1.5rem; /* 叉叉符號放大 */
   line-height: 1;
-  transition: background-color 0.3s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
 }
 
 .remove-label-btn:hover {
-  background-color: #d32f2f;
+  background-color: #ff5252;
+  color: white;
 }
 
+/* 舊的樣式若不再使用可忽略，為避免衝突或遺漏仍保留基礎設定 */
 .no-labels {
   color: #999;
   font-style: italic;
