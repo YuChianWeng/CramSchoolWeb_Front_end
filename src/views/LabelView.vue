@@ -30,10 +30,12 @@
           <div class="image-display">
             <canvas
               ref="canvas"
+              tabindex="0"
               :style="{ 
                 cursor: currentMode === 'pan' 
                   ? (isPanning ? 'grabbing' : 'grab') 
-                  : 'crosshair' 
+                  : 'crosshair',
+                outline: 'none' /* 移除聚焦時的預設黑框 */
               }"
               @mousedown="startDrawing"
               @mousemove="draw"
@@ -116,6 +118,7 @@
                         maxlength="4"
                         :ref="(el) => { if(el) inputRefs[index] = el as HTMLInputElement }"
                         @focus="selectLabel(index)"
+                        @keydown="handleInputKeydown(index, $event)"
                         @click.stop
                       />
                     </div>
@@ -158,7 +161,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, watch, nextTick, onBeforeUpdate, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../constants'
 
@@ -170,7 +173,7 @@ interface Label {
   y: number
   width: number
   height: number
-  answer?: string // 儲存老師輸入的答案
+  answer?: string
 }
 
 interface ImageData {
@@ -199,33 +202,45 @@ const panX = ref(0)
 const panY = ref(0)
 const zoom = ref(1)
 
-// 追蹤目前被選取的標籤索引 (-1 表示未選取)
 const selectedLabelIndex = ref<number>(-1)
-
-// [新增] 用來存放所有輸入框的 DOM 元素，讓我們可以程式化控制焦點
 const inputRefs = ref<HTMLInputElement[]>([])
 
 const currentImage = computed(() => images.value[currentImageIndex.value])
 
+// [新增] 確保在列表更新前清空 refs，避免索引錯亂
+onBeforeUpdate(() => {
+  inputRefs.value = []
+})
+
 onMounted(() => {
-  const state = history.state as { files?: ImageData[] }
+  // [新增] 註冊全域鍵盤監聽
+  window.addEventListener('keydown', handleGlobalKeydown)
+
+  const state = history.state as { files?: ImageData[] };
   if (state?.files && state.files.length > 0) {
     images.value = state.files.map(f => ({
       ...f,
-      labels: f.labels || [],
-      predictionsLoaded: false,
+      labels: f.labels || [], 
+      preview: f.preview,
+      predictionsLoaded: f.predictionsLoaded || false,
       isPredicting: false,
       predictionError: undefined
-    }))
+    }));
+    currentImageIndex.value = 0;
     nextTick(() => {
-      handleImageChange()
-    })
+      handleImageChange();
+    });
   } else {
     images.value = [
       { name: 'sample1.jpg', preview: '', labels: [], predictionsLoaded: false },
       { name: 'sample2.jpg', preview: '', labels: [], predictionsLoaded: false }
-    ]
+    ];
   }
+});
+
+// [新增] 移除監聽
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleGlobalKeydown)
 })
 
 watch(currentImageIndex, () => {
@@ -233,8 +248,8 @@ watch(currentImageIndex, () => {
 })
 
 const handleImageChange = () => {
-  selectedLabelIndex.value = -1 // 切換圖片時重置選取狀態
-  inputRefs.value = [] // 重置 refs 陣列
+  selectedLabelIndex.value = -1 
+  inputRefs.value = [] 
   panX.value = 0
   panY.value = 0
   zoom.value = 1
@@ -244,6 +259,28 @@ const handleImageChange = () => {
   }
   loadImage()
   fetchPredictionsForCurrentImage()
+}
+
+// [新增] 全域鍵盤事件：處理非輸入框焦點時的刪除
+const handleGlobalKeydown = (event: KeyboardEvent) => {
+  // 如果沒有選取任何標籤，不動作
+  if (selectedLabelIndex.value === -1) return
+
+  // 檢查是否為刪除鍵
+  if (event.key === 'Backspace' || event.key === 'Delete') {
+    const activeEl = document.activeElement as HTMLElement
+    
+    // 如果焦點正在某個輸入框內 (包含 Textarea 或 contentEditable)，則不執行全域刪除
+    // 這樣可以避免使用者正在打字(或修改答案)時誤刪整個框框
+    // 注意：如果是我們自己的 Label Input，它有綁定 @keydown="handleInputKeydown"，會由那裡處理「空字串才刪除」的邏輯
+    if (activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement || activeEl?.isContentEditable) {
+      return
+    }
+
+    // 如果焦點不在輸入框 (例如在 Body, Canvas, Button)，則直接刪除
+    event.preventDefault() // 防止瀏覽器上一頁等預設行為
+    removeLabel(selectedLabelIndex.value)
+  }
 }
 
 const computeFit = (imgWidth: number, imgHeight: number) => {
@@ -301,16 +338,13 @@ const drawLabels = (ctx: CanvasRenderingContext2D) => {
   if (!canvas.value || !currentImage.value?.labels) return
 
   currentImage.value.labels.forEach((label, index) => {
-    // 根據是否被選取改變顏色
     const isSelected = index === selectedLabelIndex.value
     ctx.strokeStyle = isSelected ? '#ff5252' : '#42b883'
-    ctx.lineWidth = isSelected ? 3 : 2
-    
+    ctx.lineWidth = isSelected ? 3 : 2 
     ctx.strokeRect(label.x, label.y, label.width, label.height)
   })
 }
 
-// 核心函式：強制聚焦指定的輸入框，這會觸發 @focus 進而更新 selectedLabelIndex
 const focusLabelInput = (index: number) => {
   nextTick(() => {
     const inputEl = inputRefs.value[index]
@@ -320,11 +354,20 @@ const focusLabelInput = (index: number) => {
   })
 }
 
-// 這裡被 @focus 呼叫，負責更新資料狀態與重繪
 const selectLabel = (index: number) => {
   if (selectedLabelIndex.value !== index) {
     selectedLabelIndex.value = index
     loadImage()
+  }
+}
+
+// 處理輸入框內的刪除：只有當答案為空時才刪除框框 (避免打字時誤刪)
+const handleInputKeydown = (index: number, event: KeyboardEvent) => {
+  const label = currentImage.value?.labels?.[index]
+  if (!label) return
+  if ((event.key === 'Backspace' || event.key === 'Delete') && label.answer === '') {
+    event.preventDefault()
+    removeLabel(index)
   }
 }
 
@@ -337,14 +380,12 @@ const startDrawing = (event: MouseEvent) => {
   }
 
   const { x, y } = getCanvasCoords(event)
-
-  // 碰撞偵測 - 檢查是否點擊到現有的框
   const labels = currentImage.value?.labels || []
   let hitIndex = -1
-  // 反向遍歷，確保優先選取最上層的框
+  
   for (let i = labels.length - 1; i >= 0; i--) {
     const l = labels[i]
-    if (!l) continue // 防呆
+    if (!l) continue; 
     if (x >= l.x && x <= l.x + l.width && y >= l.y && y <= l.y + l.height) {
       hitIndex = i
       break
@@ -352,18 +393,15 @@ const startDrawing = (event: MouseEvent) => {
   }
 
   if (hitIndex !== -1) {
-    // 點擊到框框：聚焦對應輸入框 (會自動觸發變色)
     focusLabelInput(hitIndex)
-    return
+    return 
   } else {
-    // 點擊空白處：如果有選取則取消選取
     if (selectedLabelIndex.value !== -1) {
       selectedLabelIndex.value = -1
       loadImage()
     }
   }
 
-  // 沒點到框框，開始畫新框
   startX.value = x
   startY.value = y
   isDrawing.value = true
@@ -397,64 +435,6 @@ const draw = (event: MouseEvent) => {
     currentY.value - startY.value
   )
   ctx.restore()
-}
-
-const endDrawing = () => {
-  if (isPanning.value) {
-    stopPan()
-    return
-  }
-
-  if (!isDrawing.value || !currentImage.value) return
-
-  isDrawing.value = false
-
-  const width = currentX.value - startX.value
-  const height = currentY.value - startY.value
-
-  if (Math.abs(width) > 10 && Math.abs(height) > 10) {
-    const label: Label = {
-      class: currentClass.value,
-      x: Math.min(startX.value, currentX.value),
-      y: Math.min(startY.value, currentY.value),
-      width: Math.abs(width),
-      height: Math.abs(height),
-      answer: '' // 初始化答案
-    }
-
-    if (!currentImage.value.labels) {
-      currentImage.value.labels = []
-    }
-    currentImage.value.labels.push(label)
-    
-    // 畫完新框後，自動聚焦到新框的輸入欄位
-    focusLabelInput(currentImage.value.labels.length - 1)
-    
-    loadImage()
-  }
-}
-
-const removeLabel = (index: number) => {
-  const img = currentImage.value
-  if (img && img.labels) {
-    img.labels.splice(index, 1)
-    // 刪除後調整選取狀態
-    if (selectedLabelIndex.value === index) {
-      selectedLabelIndex.value = -1
-    } else if (selectedLabelIndex.value > index) {
-      selectedLabelIndex.value--
-    }
-    loadImage()
-  }
-}
-
-const clearLabels = () => {
-  const img = currentImage.value
-  if (img && img.labels) {
-    img.labels = []
-    selectedLabelIndex.value = -1
-    loadImage()
-  }
 }
 
 const extractBase64FromPreview = (preview: string) => {
@@ -534,6 +514,61 @@ const retryPrediction = () => {
   img.labels = []
   selectedLabelIndex.value = -1
   fetchPredictionsForCurrentImage()
+}
+
+const endDrawing = () => {
+  if (isPanning.value) {
+    stopPan()
+    return
+  }
+
+  if (!isDrawing.value || !currentImage.value) return
+
+  isDrawing.value = false
+
+  const width = currentX.value - startX.value
+  const height = currentY.value - startY.value
+
+  if (Math.abs(width) > 10 && Math.abs(height) > 10) {
+    const label: Label = {
+      class: currentClass.value,
+      x: Math.min(startX.value, currentX.value),
+      y: Math.min(startY.value, currentY.value),
+      width: Math.abs(width),
+      height: Math.abs(height),
+      answer: ''
+    }
+
+    if (!currentImage.value.labels) {
+      currentImage.value.labels = []
+    }
+    currentImage.value.labels.push(label)
+
+    focusLabelInput(currentImage.value.labels.length - 1)
+    loadImage()
+  }
+}
+
+const removeLabel = (index: number) => {
+  const img = currentImage.value
+  if (img && img.labels) {
+    img.labels.splice(index, 1)
+    if (selectedLabelIndex.value === index) {
+      selectedLabelIndex.value = -1
+    } else if (selectedLabelIndex.value > index) {
+      selectedLabelIndex.value--
+    }
+    loadImage()
+  }
+}
+
+const clearLabels = () => {
+  const img = currentImage.value
+  if (img && img.labels) {
+    img.labels = []
+    selectedLabelIndex.value = -1
+    loadImage()
+  }
 }
 
 const getCanvasCoords = (event: MouseEvent) => {
@@ -624,7 +659,7 @@ const exportLabels = () => {
       annotations: labels.map(label => ({
         class: label.class,
         bbox: [label.x, label.y, label.width, label.height],
-        answer: label.answer || '' // 包含答案
+        answer: label.answer || ''
       }))
     }
   })
@@ -652,7 +687,6 @@ const goToResults = async () => {
     image: base64Data,
     annotations: labels.map(l => ({
       class: l.class,
-      answer: l.answer || '', // 傳遞答案給後端
       bbox: [
         (l.x - offsetX) / scale,
         (l.y - offsetY) / scale,
@@ -693,7 +727,8 @@ const goToResults = async () => {
       name: 'results', 
       state: { 
         ocrResults: resultData,
-        imageName: img.name 
+        imageName: currentImage.value?.name,
+        allImages: images.value
       } 
     });
 
@@ -790,6 +825,7 @@ h1 {
 .image-list-item.active {
   border-color: #42b883;
   background-color: #e8f5e9;
+  color: #42b883;
 }
 
 .image-list-item img {
@@ -1026,15 +1062,16 @@ canvas {
   padding-right: 0.25rem;
 }
 
-/* ----- 修改後的 Label Item 樣式 (單行整合版 + 大字體) ----- */
+/* ----- Label Item 樣式 (單行整合版) ----- */
 
 .label-item {
   position: relative; /* 為了讓絕對定位的叉叉按鈕參考 */
   display: block; /* 改為 block 方便內部 flex 排版 */
-  padding: 1rem 0.75rem; /* 加大上下 padding，讓點擊區域更舒適 */
+  /* [修改] 加大上下 padding，讓點擊區域更舒適 */
+  padding: 1rem 0.75rem; 
   background-color: white;
   border-radius: 6px;
-  margin-bottom: 0.75rem; /* 增加間距 */
+  margin-bottom: 0.75rem; /* [修改] 增加間距 */
   border: 2px solid transparent; /* 預留邊框位置 */
   cursor: pointer;
   transition: all 0.2s;
@@ -1047,18 +1084,18 @@ canvas {
   background-color: #fff5f5; /* 淡淡的紅色背景 */
 }
 
-/* 單行排版容器：名稱在左，輸入框在右 */
+/* [新增] 單行排版容器：名稱在左，輸入框在右 */
 .label-content-row {
   display: flex;
   align-items: center;
   justify-content: space-between; /* 左右撐開 */
-  margin-right: 32px; /* 右側預留空間給垂直置中的刪除按鈕 */
+  margin-right: 32px; /* [修改] 右側預留空間給垂直置中的刪除按鈕 */
 }
 
-/* 標籤名稱：字體放大 */
+/* [修改] 標籤名稱：字體放大 */
 .label-name {
   font-weight: bold;
-  font-size: 1.2rem; /* 字體放大 */
+  font-size: 1.2rem; /* [修改] 字體放大 */
   color: #42b883;
 }
 
@@ -1067,7 +1104,7 @@ canvas {
   color: #d32f2f;
 }
 
-/* 輸入框群組 (包含 "答:" 字樣) */
+/* [新增] 輸入框群組 (包含 "答:" 字樣) */
 .label-input-group {
   display: flex;
   align-items: center;
@@ -1080,14 +1117,14 @@ canvas {
   color: #2c3e50;
 }
 
-/* 輸入框樣式：字體放大、框加大 */
+/* [修改] 輸入框樣式：字體放大、框加大 */
 .label-input-group input {
   width: 70px; /* 寬度加寬 */
   padding: 4px 8px;
   border: 2px solid #ddd;
   border-radius: 6px;
   outline: none;
-  font-size: 1.2rem; /* 輸入字體放大 */
+  font-size: 1.2rem; /* [修改] 輸入字體放大 */
   text-align: center;
   color: #2c3e50; 
   font-weight: bold;
@@ -1100,7 +1137,7 @@ canvas {
   box-shadow: 0 0 0 3px rgba(66, 184, 131, 0.15);
 }
 
-/* 刪除按鈕：垂直置中 */
+/* [修改] 刪除按鈕：垂直置中 */
 .remove-label-btn {
   position: absolute;
   top: 50%;
