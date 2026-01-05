@@ -30,6 +30,13 @@
           <div class="image-display">
             <canvas
               ref="canvas"
+              tabindex="0"
+              :style="{
+                cursor: currentMode === 'pan'
+                  ? (isPanning ? 'grabbing' : 'grab')
+                  : 'crosshair',
+                outline: 'none'
+              }"
               @mousedown="startDrawing"
               @mousemove="draw"
               @mouseup="endDrawing"
@@ -65,6 +72,21 @@
           </div>
 
           <div class="controls">
+            <div class="mode-selector">
+              <label>操作模式：</label>
+              <div class="mode-buttons">
+                <button
+                  type="button"
+                  :class="{ active: currentMode === 'draw' }"
+                  @click="currentMode = 'draw'"
+                >✏️ 標註</button>
+                <button
+                  type="button"
+                  :class="{ active: currentMode === 'pan' }"
+                  @click="currentMode = 'pan'"
+                >✋ 拖移（或按住ALT）</button>
+              </div>
+            </div>
             <div class="class-selector single-class">
               <label>標註類型：</label>
               <span class="single-class-label">{{ DEFAULT_CLASS }}</span>
@@ -80,13 +102,29 @@
                   v-for="(label, index) in currentImage.labels"
                   :key="index"
                   class="label-item"
+                  :class="{ 'selected': index === selectedLabelIndex }"
+                  @click="focusLabelInput(index)"
                 >
-                  <span class="label-class">{{ label.class }}</span>
-                  <span class="label-coords">
-                    ({{ Math.round(label.x) }}, {{ Math.round(label.y) }},
-                     {{ Math.round(label.width) }}×{{ Math.round(label.height) }})
-                  </span>
-                  <button @click="removeLabel(index)" class="remove-label-btn">×</button>
+                  <button @click.stop="removeLabel(index)" class="remove-label-btn">×</button>
+
+                  <div class="label-content-row">
+                    <span class="label-name" :class="{ 'text-red': index === selectedLabelIndex }">
+                      {{ label.class }} ({{ index + 1 }})
+                    </span>
+
+                    <div class="label-input-group">
+                      <span class="input-prefix">答:</span>
+                      <input
+                        type="text"
+                        v-model="label.answer"
+                        maxlength="4"
+                        :ref="(el) => { if (el) inputRefs[index] = el as HTMLInputElement }"
+                        @focus="selectLabel(index)"
+                        @keydown="handleInputKeydown(index, $event)"
+                        @click.stop
+                      />
+                    </div>
+                  </div>
                 </div>
               </div>
               <p v-else class="no-labels">No labels yet. Draw boxes on the image.</p>
@@ -133,20 +171,24 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, watch, nextTick, onBeforeUpdate, onUnmounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../constants'
 import { setResultsData } from '../stores/resultsStore'
+import { getLabelData, setLabelData } from '../stores/labelStore'
 
 const YOLO_DEFAULT = '/api/predict'
 const OCR_DEFAULT = '/ocr'
+const OCR_PROCESS_DEFAULT = '/api/ocr_process'
 const YOLO_HARDCODE = 'http://140.115.54.239:8082/predict'
 const OCR_HARDCODE = 'http://140.115.54.239:8083/ocr'
 const YOLO_ENDPOINT = import.meta.env.VITE_YOLO_ENDPOINT || YOLO_DEFAULT
 const OCR_ENDPOINT = import.meta.env.VITE_OCR_ENDPOINT || OCR_DEFAULT
+const OCR_PROCESS_ENDPOINT = import.meta.env.VITE_OCR_PROCESS_ENDPOINT || OCR_PROCESS_DEFAULT
 const isPreviewPort = typeof window !== 'undefined' && window.location?.port === '4173'
 
 const DEFAULT_CLASS = '答案區'
+const LABEL_STORAGE_KEY = 'label-page-data'
 
 interface Label {
   class: string
@@ -155,6 +197,7 @@ interface Label {
   width: number
   height: number
   recognizedAnswer?: string
+  answer?: string
   expectedAnswer?: string
   isCorrect?: boolean
 }
@@ -168,18 +211,24 @@ interface ImageData {
   predictionError?: string
   isOcrRunning?: boolean
   ocrError?: string
+  ocrPromise?: Promise<void>
 }
 
 const router = useRouter()
+const route = useRoute()
 const canvas = ref<HTMLCanvasElement | null>(null)
 const images = ref<ImageData[]>([])
 const currentImageIndex = ref(0)
 const currentClass = ref(DEFAULT_CLASS)
 const isDrawing = ref(false)
 const isPanning = ref(false)
+const currentMode = ref<'draw' | 'pan'>('draw')
 const autoScanInProgress = ref(false)
 const REQUEST_TIMEOUT_MS = 15000
+const YOLO_REQUEST_TIMEOUT_MS = 45000
+const OCR_REQUEST_TIMEOUT_MS = 30000
 let autoScanPromise: Promise<void> | null = null
+let autoProcessPromise: Promise<void> | null = null
 const isVerifying = ref(false)
 const startX = ref(0)
 const startY = ref(0)
@@ -188,6 +237,8 @@ const currentY = ref(0)
 const panX = ref(0)
 const panY = ref(0)
 const zoom = ref(1)
+const selectedLabelIndex = ref<number>(-1)
+const inputRefs = ref<HTMLInputElement[]>([])
 
 const currentImage = computed(() => images.value[currentImageIndex.value])
 const resultsHref = computed(() => {
@@ -198,38 +249,166 @@ const resultsHref = computed(() => {
 const allScansComplete = computed(
   () =>
     images.value.length > 0 &&
-    images.value.every((img) => Boolean(img.predictionsLoaded || img.predictionError))
+    images.value.every(
+      (img) =>
+        Boolean(img.predictionsLoaded || img.predictionError) ||
+        (img.labels?.length ?? 0) > 0
+    )
 )
+const extractTextValue = (value: any, seen = new Set<any>()): string => {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value)
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0 ? extractTextValue(value[0], seen) : ''
+  }
+  if (typeof value === 'object') {
+    if (seen.has(value)) return ''
+    seen.add(value)
+    const candidate =
+      value.text ??
+      value.words ??
+      value.word ??
+      value.label ??
+      value.content ??
+      value.result ??
+      value.prediction ??
+      value.ocr ??
+      value.value ??
+      value.answer ??
+      value.recognizedAnswer ??
+      value.data?.text ??
+      value.data?.words ??
+      value.data?.word ??
+      value.data?.label ??
+      value.data?.result ??
+      value.data?.prediction ??
+      value.data?.ocr
+    if (candidate !== undefined && candidate !== null) {
+      return candidate === value ? '' : extractTextValue(candidate, seen)
+    }
+    for (const key of Object.keys(value)) {
+      const found = extractTextValue((value as Record<string, any>)[key], seen)
+      if (found) return found
+    }
+  }
+  return ''
+}
+
+const normalizeAnswer = (value?: any) => extractTextValue(value).trim()
+
+const serializeImages = (files: ImageData[]) =>
+  files.map((img) => ({
+    name: img.name,
+    preview: img.preview,
+    labels: (img.labels || []).map((label) => ({
+      class: label.class,
+      x: label.x,
+      y: label.y,
+      width: label.width,
+      height: label.height,
+      recognizedAnswer: normalizeAnswer(label.recognizedAnswer),
+      answer: normalizeAnswer(label.answer),
+      expectedAnswer: normalizeAnswer(label.expectedAnswer),
+      isCorrect: label.isCorrect
+    })),
+    predictionsLoaded: img.predictionsLoaded
+  }))
+
+const hydrateImages = (files: ImageData[]) => {
+  return files.map((f) => {
+    const labels = (f.labels || []).map((label) => {
+      const answer = normalizeAnswer(label.answer) || normalizeAnswer(label.expectedAnswer)
+      return {
+        ...label,
+        answer,
+        expectedAnswer: answer
+      }
+    })
+    const hasLabels = labels.length > 0
+    const predictionsLoaded =
+      typeof f.predictionsLoaded === 'boolean' ? f.predictionsLoaded : hasLabels
+    return {
+      ...f,
+      labels,
+      predictionsLoaded: hasLabels ? predictionsLoaded : false,
+      isPredicting: false,
+      predictionError: undefined,
+      isOcrRunning: false,
+      ocrError: undefined
+    }
+  })
+}
+
+const persistLabelCache = (files: ImageData[]) => {
+  setLabelData(serializeImages(files))
+  try {
+    if (files.length === 0) {
+      sessionStorage.removeItem(LABEL_STORAGE_KEY)
+      return
+    }
+    sessionStorage.setItem(LABEL_STORAGE_KEY, JSON.stringify(serializeImages(files)))
+  } catch (err) {
+    console.warn('Unable to persist label cache', err)
+  }
+}
+
+const loadLabelCache = () => {
+  const cached = sessionStorage.getItem(LABEL_STORAGE_KEY)
+  if (!cached) return null
+  try {
+    return JSON.parse(cached) as ImageData[]
+  } catch (err) {
+    console.warn('Unable to parse label cache', err)
+    return null
+  }
+}
+
+onBeforeUpdate(() => {
+  inputRefs.value = []
+})
 
 onMounted(() => {
+  window.addEventListener('keydown', handleGlobalKeydown)
+
   // Try to get images from router state
-  const state = history.state as { files?: ImageData[] }
-  if (state?.files && state.files.length > 0) {
-    images.value = state.files.map(f => ({
-      ...f,
-      labels: f.labels || [],
-      predictionsLoaded: false,
-      isPredicting: false,
-      predictionError: undefined
-    }))
+  const historyState = history.state as { files?: ImageData[]; state?: { files?: ImageData[] } }
+  const routeState = route.state as { files?: ImageData[] } | undefined
+  const incomingFiles =
+    routeState?.files || historyState?.files || historyState?.state?.files || null
+  const memoryFiles = getLabelData()
+  const cachedFiles = loadLabelCache()
+
+  const initialFiles =
+    (memoryFiles && memoryFiles.length > 0
+      ? memoryFiles
+      : incomingFiles && incomingFiles.length > 0
+        ? incomingFiles
+        : cachedFiles && cachedFiles.length > 0
+          ? cachedFiles
+          : null)
+
+  if (initialFiles && initialFiles.length > 0) {
+    images.value = hydrateImages(initialFiles)
+    persistLabelCache(images.value)
     nextTick(() => {
       handleImageChange()
-      void scanAllImages()
+      void runAutoPipeline()
     })
-  } else {
-    // Load sample images for demonstration
-    images.value = [
-      { name: 'sample1.jpg', preview: '', labels: [], predictionsLoaded: false },
-      { name: 'sample2.jpg', preview: '', labels: [], predictionsLoaded: false }
-    ]
   }
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleGlobalKeydown)
+  persistLabelCache(images.value)
 })
 
 watch(
   () => images.value,
   (nextImages) => {
     if (nextImages.length > 0) {
-      void scanAllImages()
+      void runAutoPipeline()
     }
   },
   { deep: false }
@@ -240,6 +419,8 @@ watch(currentImageIndex, () => {
 })
 
 const handleImageChange = () => {
+  selectedLabelIndex.value = -1
+  inputRefs.value = []
   panX.value = 0
   panY.value = 0
   zoom.value = 1
@@ -249,6 +430,25 @@ const handleImageChange = () => {
   }
   loadImage()
   fetchPredictionsForCurrentImage()
+  void runOcrForImage(currentImage.value)
+}
+
+const handleGlobalKeydown = (event: KeyboardEvent) => {
+  if (selectedLabelIndex.value === -1) return
+
+  if (event.key === 'Backspace' || event.key === 'Delete') {
+    const activeEl = document.activeElement as HTMLElement
+    if (
+      activeEl instanceof HTMLInputElement ||
+      activeEl instanceof HTMLTextAreaElement ||
+      activeEl?.isContentEditable
+    ) {
+      return
+    }
+
+    event.preventDefault()
+    removeLabel(selectedLabelIndex.value)
+  }
 }
 
 const computeFit = (imgWidth: number, imgHeight: number) => {
@@ -307,28 +507,75 @@ const loadImage = () => {
 const drawLabels = (ctx: CanvasRenderingContext2D) => {
   if (!canvas.value || !currentImage.value?.labels) return
 
-  currentImage.value.labels.forEach((label) => {
-    ctx.strokeStyle = '#42b883'
-    ctx.lineWidth = 2
+  currentImage.value.labels.forEach((label, index) => {
+    const isSelected = index === selectedLabelIndex.value
+    ctx.strokeStyle = isSelected ? '#ff5252' : '#42b883'
+    ctx.lineWidth = isSelected ? 3 : 2
     ctx.strokeRect(label.x, label.y, label.width, label.height)
-
-    ctx.fillStyle = '#42b883'
-    ctx.fillRect(label.x, label.y - 20, label.class.length * 10 + 20, 20)
-    ctx.fillStyle = 'white'
-    ctx.font = '14px Arial'
-    ctx.fillText(label.class, label.x + 5, label.y - 5)
   })
+}
+
+const focusLabelInput = (index: number) => {
+  selectLabel(index)
+  nextTick(() => {
+    const inputEl = inputRefs.value[index]
+    if (inputEl) {
+      inputEl.focus()
+      inputEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }
+  })
+}
+
+const selectLabel = (index: number) => {
+  if (selectedLabelIndex.value !== index) {
+    selectedLabelIndex.value = index
+    loadImage()
+  }
+}
+
+const handleInputKeydown = (index: number, event: KeyboardEvent) => {
+  const label = currentImage.value?.labels?.[index]
+  if (!label) return
+  const answerValue = label.answer ?? ''
+  if ((event.key === 'Backspace' || event.key === 'Delete') && answerValue === '') {
+    event.preventDefault()
+    removeLabel(index)
+  }
 }
 
 const startDrawing = (event: MouseEvent) => {
   if (!canvas.value) return
 
-  if (event.button !== 0 || event.altKey) {
+  if (currentMode.value === 'pan' || event.button !== 0 || event.altKey) {
     startPan(event)
     return
   }
 
   const { x, y } = getCanvasCoords(event)
+  const labels = currentImage.value?.labels || []
+  let hitIndex = -1
+
+  for (let i = labels.length - 1; i >= 0; i--) {
+    const label = labels[i]
+    if (!label) continue
+    if (
+      x >= label.x &&
+      x <= label.x + label.width &&
+      y >= label.y &&
+      y <= label.y + label.height
+    ) {
+      hitIndex = i
+      break
+    }
+  }
+
+  if (hitIndex !== -1) {
+    focusLabelInput(hitIndex)
+    return
+  } else if (selectedLabelIndex.value !== -1) {
+    selectedLabelIndex.value = -1
+    loadImage()
+  }
   startX.value = x
   startY.value = y
   isDrawing.value = true
@@ -369,6 +616,42 @@ const draw = (event: MouseEvent) => {
 const extractBase64FromPreview = (preview: string) => {
   const separatorIndex = preview.indexOf(',')
   return separatorIndex >= 0 ? preview.slice(separatorIndex + 1) : preview
+}
+
+const clampNumber = (value: number, min: number, max: number) =>
+  Math.min(Math.max(value, min), max)
+
+const toImageBBox = (
+  label: Label,
+  scale: number,
+  offsetX: number,
+  offsetY: number,
+  imgWidth: number,
+  imgHeight: number
+) => {
+  const x1 = (label.x - offsetX) / scale
+  const y1 = (label.y - offsetY) / scale
+  const x2 = (label.x + label.width - offsetX) / scale
+  const y2 = (label.y + label.height - offsetY) / scale
+
+  const left = clampNumber(Math.min(x1, x2), 0, imgWidth)
+  const top = clampNumber(Math.min(y1, y2), 0, imgHeight)
+  const right = clampNumber(Math.max(x1, x2), 0, imgWidth)
+  const bottom = clampNumber(Math.max(y1, y2), 0, imgHeight)
+
+  return [left, top, right, bottom]
+}
+
+const extractOcrResultsArray = (data: any) => {
+  const results =
+    data?.ocr_results ??
+    data?.ocrResults ??
+    data?.result?.ocr_results ??
+    data?.data?.ocr_results ??
+    data?.body?.json?.ocr_results
+
+  if (!Array.isArray(results)) return null
+  return results.map((value) => normalizeAnswer(value))
 }
 
 const fetchWithFallback = async (
@@ -441,8 +724,15 @@ const toPixelBox = (
   return { x1, y1, x2, y2 }
 }
 
+const shouldAutoScan = (img?: ImageData) => {
+  if (!img || !img.preview || img.isPredicting) return false
+  const hasLabels = (img.labels?.length ?? 0) > 0
+  if (hasLabels) return false
+  return !img.predictionsLoaded
+}
+
 const fetchPredictionsForImage = async (img?: ImageData) => {
-  if (!img || !img.preview || img.isPredicting || img.predictionsLoaded) return
+  if (!shouldAutoScan(img)) return
 
   img.isPredicting = true
   img.predictionError = undefined
@@ -461,7 +751,11 @@ const fetchPredictionsForImage = async (img?: ImageData) => {
           : [YOLO_ENDPOINT, YOLO_DEFAULT, YOLO_HARDCODE]
       )
     )
-    const data = await fetchWithFallback(yoloEndpoints, { image_base64 })
+    const data = await fetchWithFallback(
+      yoloEndpoints,
+      { image_base64 },
+      YOLO_REQUEST_TIMEOUT_MS
+    )
     const detections =
       data?.detections ||
       data?.predictions ||
@@ -491,7 +785,9 @@ const fetchPredictionsForImage = async (img?: ImageData) => {
           x: boxX,
           y: boxY,
           width: boxWidth,
-          height: boxHeight
+          height: boxHeight,
+          answer: '',
+          expectedAnswer: ''
         }
       })
       .filter((v): v is Label => Boolean(v))
@@ -505,7 +801,10 @@ const fetchPredictionsForImage = async (img?: ImageData) => {
   } catch (error: any) {
     console.error('Error fetching predictions:', error)
     const message = error?.message || 'Unable to fetch predictions'
-    if (message.includes('Failed to fetch') || message.includes('CORS')) {
+    const lowerMessage = message.toLowerCase()
+    if (error?.name === 'AbortError' || lowerMessage.includes('aborted')) {
+      img.predictionError = 'Prediction timed out. Please retry.'
+    } else if (message.includes('Failed to fetch') || message.includes('CORS')) {
       img.predictionError = 'Prediction blocked by network/CORS. Please use the proxied endpoint (/api/predict) or set VITE_YOLO_ENDPOINT.'
     } else if (message.startsWith('Request failed (')) {
       img.predictionError = 'Prediction failed with server error. Please retry or contact admin.'
@@ -526,9 +825,7 @@ const scanAllImages = async () => {
   if (autoScanPromise) return autoScanPromise
   autoScanInProgress.value = true
   autoScanPromise = (async () => {
-    const queue = images.value.filter(
-      (img) => img.preview && !img.predictionsLoaded && !img.isPredicting
-    )
+    const queue = images.value.filter((img) => shouldAutoScan(img))
     if (queue.length === 0) return
 
     const maxWorkers = Math.min(3, queue.length)
@@ -550,6 +847,19 @@ const scanAllImages = async () => {
     })
 
   return autoScanPromise
+}
+
+const runAutoPipeline = async () => {
+  if (autoProcessPromise) return autoProcessPromise
+  autoProcessPromise = (async () => {
+    await scanAllImages()
+    await Promise.allSettled(images.value.map((img) => runOcrForImage(img)))
+  })()
+    .finally(() => {
+      autoProcessPromise = null
+    })
+
+  return autoProcessPromise
 }
 
 const retryPrediction = () => {
@@ -582,7 +892,9 @@ const endDrawing = () => {
       x: Math.min(startX.value, currentX.value),
       y: Math.min(startY.value, currentY.value),
       width: Math.abs(width),
-      height: Math.abs(height)
+      height: Math.abs(height),
+      answer: '',
+      expectedAnswer: ''
     }
 
     if (!currentImage.value.labels) {
@@ -590,6 +902,7 @@ const endDrawing = () => {
     }
     currentImage.value.labels.push(label)
 
+    focusLabelInput(currentImage.value.labels.length - 1)
     loadImage()
     runOcrForImage(currentImage.value)
   }
@@ -599,6 +912,11 @@ const removeLabel = (index: number) => {
   const img = currentImage.value
   if (img && img.labels) {
     img.labels.splice(index, 1)
+    if (selectedLabelIndex.value === index) {
+      selectedLabelIndex.value = -1
+    } else if (selectedLabelIndex.value > index) {
+      selectedLabelIndex.value -= 1
+    }
     loadImage()
   }
 }
@@ -607,6 +925,7 @@ const clearLabels = () => {
   const img = currentImage.value
   if (img && img.labels) {
     img.labels = []
+    selectedLabelIndex.value = -1
     loadImage()
   }
 }
@@ -699,7 +1018,8 @@ const exportLabels = () => {
       image: img.name,
       annotations: labels.map(label => ({
         class: label.class,
-        bbox: [label.x, label.y, label.width, label.height]
+        bbox: [label.x, label.y, label.width, label.height],
+        answer: label.answer || ''
       }))
     }
   })
@@ -718,8 +1038,27 @@ const RESULTS_STORAGE_KEY = 'results-page-data'
 
 const persistResultsForNextPage = () => {
   const payload = images.value.map(img => {
-    const labels = img.labels || []
-    const correctCount = labels.filter((label: any) => label?.isCorrect === true).length
+    const labels = (img.labels || []).map((label) => {
+      const expectedAnswer =
+        normalizeAnswer(label.answer) || normalizeAnswer(label.expectedAnswer)
+      const hasBoth = expectedAnswer && label.recognizedAnswer
+      const isCorrect =
+        typeof label.isCorrect === 'boolean'
+          ? label.isCorrect
+          : hasBoth
+            ? normalizeAnswer(label.recognizedAnswer) === normalizeAnswer(expectedAnswer)
+            : undefined
+      return {
+        ...label,
+        recognizedAnswer: normalizeAnswer(label.recognizedAnswer),
+        answer: expectedAnswer,
+        expectedAnswer,
+        isCorrect
+      }
+    })
+    const gradedLabels = labels.filter((label) => typeof label.isCorrect === 'boolean')
+    const correctCount =
+      gradedLabels.length > 0 ? gradedLabels.filter((label) => label.isCorrect).length : undefined
     return {
       name: img.name,
       preview: img.preview,
@@ -734,6 +1073,7 @@ const persistResultsForNextPage = () => {
   } catch (err) {
     console.warn('Unable to persist results to sessionStorage', err)
   }
+  return payload
 }
 
 const handleVerifyClick = async (event: MouseEvent) => {
@@ -741,15 +1081,14 @@ const handleVerifyClick = async (event: MouseEvent) => {
   if (isVerifying.value) return
   isVerifying.value = true
   try {
-    if (!allScansComplete.value) {
-      await scanAllImages()
-    }
+    await runAutoPipeline()
     try {
-      persistResultsForNextPage()
+      const payload = persistResultsForNextPage()
+      router.push({ name: 'results', state: { results: payload } })
     } catch (err) {
       console.warn('Unable to persist results for next page', err)
+      router.push({ name: 'results' })
     }
-    window.location.assign(resultsHref.value || '/#/results')
   } finally {
     isVerifying.value = false
   }
@@ -792,46 +1131,109 @@ const cropLabelToBase64 = (source: HTMLCanvasElement, label: Label) => {
   return extractBase64FromPreview(dataUrl)
 }
 
-const runOcrForImage = async (img?: ImageData) => {
-  if (!img || img.isOcrRunning) return
-  if (!img.preview || !img.labels || img.labels.length === 0) return
+const runOcrForImage = (img?: ImageData) => {
+  if (!img || !img.preview || !img.labels || img.labels.length === 0) {
+    return Promise.resolve()
+  }
+
+  if (img.ocrPromise) {
+    return img.ocrPromise
+  }
 
   const targets = img.labels.filter(label => !label.recognizedAnswer)
-  if (targets.length === 0) return
+  if (targets.length === 0) {
+    return Promise.resolve()
+  }
 
   img.isOcrRunning = true
   img.ocrError = undefined
 
-  try {
-    const sourceCanvas = await buildCanvasForImage(img.preview)
-    if (!sourceCanvas) throw new Error('Unable to prepare canvas for OCR')
+  img.ocrPromise = (async () => {
+    try {
+      const labels = img.labels || []
+      let batchApplied = false
 
-    for (const label of targets) {
-      const cropped = cropLabelToBase64(sourceCanvas, label)
-      if (!cropped) continue
-
-      const ocrEndpoints = Array.from(
-        new Set(
-          isPreviewPort
-            ? [OCR_HARDCODE, OCR_ENDPOINT, OCR_DEFAULT]
-            : [OCR_ENDPOINT, OCR_DEFAULT, OCR_HARDCODE]
+      try {
+        const previewImg = await loadPreviewImage(img.preview)
+        const { scale, offsetX, offsetY } = computeFit(previewImg.width, previewImg.height)
+        const annotations = labels.map((label) => ({
+          class: label.class,
+          bbox: toImageBBox(label, scale, offsetX, offsetY, previewImg.width, previewImg.height)
+        }))
+        const payload = {
+          image: extractBase64FromPreview(img.preview),
+          annotations
+        }
+        const ocrProcessEndpoints = Array.from(
+          new Set(
+            isPreviewPort
+              ? [OCR_HARDCODE, OCR_PROCESS_ENDPOINT, OCR_PROCESS_DEFAULT]
+              : [OCR_PROCESS_ENDPOINT, OCR_PROCESS_DEFAULT, OCR_HARDCODE]
+          )
         )
-      )
-      const data = await fetchWithFallback(ocrEndpoints, { image: cropped })
-      const text =
-        data?.text ||
-        data?.result ||
-        data?.prediction ||
-        data?.body?.json?.text ||
-        ''
-      label.recognizedAnswer = String(text)
+        const data = await fetchWithFallback(
+          ocrProcessEndpoints,
+          payload,
+          OCR_REQUEST_TIMEOUT_MS
+        )
+        const ocrResults = extractOcrResultsArray(data)
+        if (ocrResults && ocrResults.length > 0) {
+          const limit = Math.min(labels.length, ocrResults.length)
+          for (let i = 0; i < limit; i++) {
+            labels[i].recognizedAnswer = ocrResults[i]
+          }
+          batchApplied = true
+        }
+      } catch (error) {
+        console.warn('Batch OCR failed, falling back to per-label OCR', error)
+      }
+
+      if (!batchApplied) {
+        const sourceCanvas = await buildCanvasForImage(img.preview)
+        if (!sourceCanvas) throw new Error('Unable to prepare canvas for OCR')
+
+        const ocrEndpoints = Array.from(
+          new Set(
+            isPreviewPort
+              ? [OCR_HARDCODE, OCR_ENDPOINT, OCR_DEFAULT]
+              : [OCR_ENDPOINT, OCR_DEFAULT, OCR_HARDCODE]
+          )
+        )
+
+        for (const label of targets) {
+          const cropped = cropLabelToBase64(sourceCanvas, label)
+          if (!cropped) continue
+
+          const data = await fetchWithFallback(
+            ocrEndpoints,
+            { image: cropped },
+            OCR_REQUEST_TIMEOUT_MS
+          )
+          const text =
+            data?.text ??
+            data?.result ??
+            data?.prediction ??
+            data?.ocr ??
+            data?.data?.text ??
+            data?.data?.result ??
+            data?.data?.prediction ??
+            data?.body?.json?.text ??
+            data?.body?.json?.result ??
+            ''
+          label.recognizedAnswer = normalizeAnswer(text)
+        }
+      }
+    } catch (error: any) {
+      console.error('OCR error:', error)
+      img.ocrError = error?.message || 'OCR 發生錯誤'
     }
-  } catch (error: any) {
-    console.error('OCR error:', error)
-    img.ocrError = error?.message || 'OCR 發生錯誤'
-  } finally {
-    img.isOcrRunning = false
-  }
+  })()
+    .finally(() => {
+      img.isOcrRunning = false
+      img.ocrPromise = undefined
+    })
+
+  return img.ocrPromise
 }
 </script>
 
@@ -1092,6 +1494,38 @@ canvas {
   overflow-y: auto;
 }
 
+.mode-selector {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.mode-buttons {
+  display: inline-flex;
+  gap: 0.5rem;
+  background: #f7f7f7;
+  padding: 0.35rem;
+  border-radius: 12px;
+  border: 1px solid #e0e0e0;
+}
+
+.mode-buttons button {
+  border: none;
+  padding: 0.4rem 0.9rem;
+  border-radius: 10px;
+  cursor: pointer;
+  background: transparent;
+  color: #2c3e50;
+}
+
+.mode-buttons button.active {
+  background: #42b883;
+  color: white;
+  box-shadow: 0 3px 10px rgba(66, 184, 131, 0.35);
+}
+
 .class-selector {
   display: flex;
   align-items: center;
@@ -1129,42 +1563,94 @@ canvas {
 }
 
 .label-item {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem;
+  position: relative;
+  display: block;
+  padding: 1rem 0.75rem;
   background-color: white;
-  border-radius: 4px;
-  margin-bottom: 0.5rem;
+  border-radius: 6px;
+  margin-bottom: 0.75rem;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
 }
 
-.label-class {
+.label-item.selected {
+  border-color: #ff5252;
+  background-color: #fff5f5;
+}
+
+.label-content-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-right: 32px;
+}
+
+.label-name {
   font-weight: bold;
+  font-size: 1.2rem;
   color: #42b883;
 }
 
-.label-coords {
-  font-size: 0.875rem;
-  color: #666;
-  flex: 1;
-  text-align: right;
+.label-name.text-red {
+  color: #d32f2f;
+}
+
+.label-input-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.input-prefix {
+  font-size: 1rem;
+  font-weight: bold;
+  color: #2c3e50;
+}
+
+.label-input-group input {
+  width: 70px;
+  padding: 4px 8px;
+  border: 2px solid #ddd;
+  border-radius: 6px;
+  outline: none;
+  font-size: 1.2rem;
+  text-align: center;
+  color: #2c3e50;
+  font-weight: bold;
+  background-color: #f9f9f9;
+}
+
+.label-input-group input:focus {
+  border-color: #42b883;
+  background-color: #fff;
+  box-shadow: 0 0 0 3px rgba(66, 184, 131, 0.15);
 }
 
 .remove-label-btn {
-  background-color: #ff5252;
-  color: white;
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  background-color: transparent;
+  color: #bbb;
   border: none;
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   cursor: pointer;
-  font-size: 1.2rem;
+  font-size: 1.5rem;
   line-height: 1;
-  transition: background-color 0.3s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
 }
 
 .remove-label-btn:hover {
-  background-color: #d32f2f;
+  background-color: #ff5252;
+  color: white;
 }
 
 .no-labels {

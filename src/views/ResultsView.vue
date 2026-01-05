@@ -72,7 +72,7 @@
                 >
                   <span class="answer-index">#{{ idx + 1 }}</span>
                   <span class="answer-text">OCR：{{ label.recognizedAnswer || '—' }}</span>
-                  <span class="answer-text">正解：{{ label.expectedAnswer || '—' }}</span>
+                  <span class="answer-text">正解：{{ label.expectedAnswer || label.answer || '—' }}</span>
                   <span class="answer-chip" :class="label.isCorrect ? 'chip-correct' : label.isCorrect === false ? 'chip-wrong' : 'chip-pending'">
                     {{ label.isCorrect === undefined ? '未判定' : label.isCorrect ? '正確' : '錯誤' }}
                   </span>
@@ -118,7 +118,7 @@
         >
           <span class="answer-index">#{{ idx + 1 }}</span>
           <span class="answer-text">OCR：{{ label.recognizedAnswer || '—' }}</span>
-          <span class="answer-text">正解：{{ label.expectedAnswer || '—' }}</span>
+          <span class="answer-text">正解：{{ label.expectedAnswer || label.answer || '—' }}</span>
           <span class="answer-chip" :class="label.isCorrect ? 'chip-correct' : label.isCorrect === false ? 'chip-wrong' : 'chip-pending'">
             {{ label.isCorrect === undefined ? '未判定' : label.isCorrect ? '正確' : '錯誤' }}
           </span>
@@ -136,6 +136,7 @@ import { getResultsData } from '../stores/resultsStore'
 interface LabelResult {
   recognizedAnswer?: string
   expectedAnswer?: string
+  answer?: string
   isCorrect?: boolean
   x?: number
   y?: number
@@ -169,13 +170,112 @@ const placeholderImage =
 const BASE_CANVAS_WIDTH = 800
 const BASE_CANVAS_HEIGHT = 600
 
+const extractTextValue = (value: any, seen = new Set<any>()): string => {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value)
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0 ? extractTextValue(value[0], seen) : ''
+  }
+  if (typeof value === 'object') {
+    if (seen.has(value)) return ''
+    seen.add(value)
+    const candidate =
+      value.text ??
+      value.words ??
+      value.word ??
+      value.label ??
+      value.content ??
+      value.result ??
+      value.prediction ??
+      value.ocr ??
+      value.value ??
+      value.answer ??
+      value.recognizedAnswer ??
+      value.data?.text ??
+      value.data?.words ??
+      value.data?.word ??
+      value.data?.label ??
+      value.data?.result ??
+      value.data?.prediction ??
+      value.data?.ocr
+    if (candidate !== undefined && candidate !== null) {
+      return candidate === value ? '' : extractTextValue(candidate, seen)
+    }
+    for (const key of Object.keys(value)) {
+      const found = extractTextValue((value as Record<string, any>)[key], seen)
+      if (found) return found
+    }
+  }
+  return ''
+}
+
+const normalizeAnswer = (value?: any) => extractTextValue(value).trim()
+
+const extractOcrResultsArray = (payload: any) => {
+  const results =
+    payload?.ocr_results ??
+    payload?.ocrResults ??
+    payload?.results ??
+    payload?.data?.ocr_results ??
+    payload?.body?.json?.ocr_results
+
+  if (!Array.isArray(results)) return null
+  return results.map((value) => normalizeAnswer(value))
+}
+
+const mergeOcrResultsWithImages = (
+  images: IncomingImage[],
+  ocrPayload: any,
+  imageName?: string
+) => {
+  const ocrResults = extractOcrResultsArray(ocrPayload)
+  if (!ocrResults) return images
+
+  let targetIndex = imageName
+    ? images.findIndex((img) => img.name === imageName)
+    : images.length === 1
+      ? 0
+      : -1
+
+  if (targetIndex === -1 && images.length > 0) {
+    targetIndex = 0
+  }
+
+  return images.map((img, index) => {
+    if (index !== targetIndex) return img
+    const labels = (img.labels ?? []).map((label, labelIndex) => ({
+      ...label,
+      recognizedAnswer: normalizeAnswer(ocrResults[labelIndex] ?? label.recognizedAnswer)
+    }))
+    return { ...img, labels }
+  })
+}
+
 const normalizeImage = (img: IncomingImage): NormalizedImage => {
-  const labels = img.labels ?? []
+  const labels = (img.labels ?? []).map((label) => {
+    const normalizedRecognized = normalizeAnswer(label.recognizedAnswer)
+    const normalizedAnswer = normalizeAnswer(label.answer)
+    const expectedAnswer =
+      normalizedAnswer || normalizeAnswer(label.expectedAnswer)
+    let isCorrect = label.isCorrect
+    if (typeof isCorrect !== 'boolean' && expectedAnswer && normalizedRecognized) {
+      isCorrect = normalizedRecognized === normalizeAnswer(expectedAnswer)
+    }
+    return {
+      ...label,
+      recognizedAnswer: normalizedRecognized,
+      answer: normalizedAnswer,
+      expectedAnswer,
+      isCorrect
+    }
+  })
   const gradedLabels = labels.filter(label => typeof label.isCorrect === 'boolean')
   const providedCorrect = typeof img.correctCount === 'number' ? img.correctCount : null
   const totalLabels = typeof img.totalLabels === 'number' ? img.totalLabels : labels.length
   const derivedCorrect = gradedLabels.filter(label => label.isCorrect).length
-  const correctCount = providedCorrect ?? derivedCorrect
+  const correctCount = gradedLabels.length > 0 ? derivedCorrect : providedCorrect ?? derivedCorrect
   const boundedCorrect = Math.min(Math.max(correctCount, 0), totalLabels || Number.MAX_SAFE_INTEGER)
   const graded = providedCorrect !== null || gradedLabels.length > 0
   const accuracy = totalLabels > 0 ? Math.round((boundedCorrect / totalLabels) * 100) : 0
@@ -202,8 +302,35 @@ const loadResultsFromState = () => {
     return
   }
 
-  const state = history.state as { results?: IncomingImage[]; images?: IncomingImage[] }
-  const payload = state?.results || state?.images
+  const state = history.state as {
+    results?: IncomingImage[]
+    images?: IncomingImage[]
+    allImages?: IncomingImage[]
+    ocrResults?: any
+    imageName?: string
+    state?: {
+      results?: IncomingImage[]
+      images?: IncomingImage[]
+      allImages?: IncomingImage[]
+      ocrResults?: any
+      imageName?: string
+    }
+  }
+
+  const nestedState = state?.state
+  const ocrPayload = state?.ocrResults || nestedState?.ocrResults
+  const ocrImages = state?.allImages || state?.images || nestedState?.allImages || nestedState?.images
+  const ocrImageName = state?.imageName || nestedState?.imageName
+
+  if (ocrPayload && ocrImages && ocrImages.length > 0) {
+    const merged = mergeOcrResultsWithImages(ocrImages, ocrPayload, ocrImageName)
+    scoredImages.value = merged.map(normalizeImage)
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
+    return
+  }
+
+  const payload =
+    state?.results || state?.images || nestedState?.results || nestedState?.images
 
   if (payload && payload.length > 0) {
     scoredImages.value = payload.map(normalizeImage)
@@ -401,14 +528,15 @@ h1 {
 .thumb {
   position: relative;
   background: #eef4f8;
-  height: 220px;
+  aspect-ratio: 4 / 3;
   overflow: hidden;
 }
 
 .thumb img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  display: block;
+  object-fit: contain;
 }
 
 .overlay {
@@ -615,11 +743,15 @@ h1 {
   border: 1px solid #e4e9ed;
   border-radius: 8px;
   overflow: hidden;
-  max-height: 600px;
+  width: 100%;
+  max-width: 800px;
+  aspect-ratio: 4 / 3;
+  margin: 0 auto;
 }
 
 .modal-image-wrap img {
   width: 100%;
+  height: 100%;
   display: block;
   object-fit: contain;
 }

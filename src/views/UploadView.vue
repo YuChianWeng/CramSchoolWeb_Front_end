@@ -28,12 +28,12 @@
       <button
         @click="uploadFiles"
         class="upload-btn"
-        :disabled="isUploading || selectedFiles.length === 0"
+        :disabled="isUploading || isReading || selectedFiles.length === 0"
       >
-        {{ isUploading ? 'Uploading...' : 'Upload & Label' }}
+        {{ isUploading ? 'Uploading...' : isReading ? 'Loading...' : 'Upload & Label' }}
       </button>
     </div>
-    <p v-if="isUploading" class="loading-text">loading...</p>
+    <p v-if="isUploading || isReading" class="loading-text">loading...</p>
 
     <div v-if="selectedFiles.length > 0" class="file-list">
       <h2>Selected Images ({{ selectedFiles.length }})</h2>
@@ -49,8 +49,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { setLabelData } from '../stores/labelStore'
 
 interface FileWithPreview {
   file: File
@@ -63,6 +64,49 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const selectedFiles = ref<FileWithPreview[]>([])
 const isDragging = ref(false)
 const isUploading = ref(false)
+const LABEL_STORAGE_KEY = 'label-page-data'
+const pendingReads = ref(0)
+const isReading = computed(() => pendingReads.value > 0)
+
+const persistSelection = () => {
+  const filesData = selectedFiles.value.map(f => ({
+    name: f.name,
+    preview: f.preview,
+    labels: []
+  }))
+  setLabelData(filesData)
+  try {
+    if (filesData.length === 0) {
+      sessionStorage.removeItem(LABEL_STORAGE_KEY)
+      return
+    }
+    sessionStorage.setItem(LABEL_STORAGE_KEY, JSON.stringify(filesData))
+  } catch (err) {
+    console.warn('Unable to persist selection', err)
+  }
+}
+
+watch(
+  selectedFiles,
+  () => {
+    persistSelection()
+  },
+  { deep: true }
+)
+
+const waitForReads = () =>
+  new Promise<void>((resolve) => {
+    if (pendingReads.value === 0) {
+      resolve()
+      return
+    }
+    const stop = watch(pendingReads, (value) => {
+      if (value === 0) {
+        stop()
+        resolve()
+      }
+    })
+  })
 
 const triggerFileInput = () => {
   fileInput.value?.click()
@@ -96,12 +140,19 @@ const addFiles = (files: File[]) => {
   files.forEach(file => {
     if (file.type.startsWith('image/')) {
       const reader = new FileReader()
+      pendingReads.value += 1
       reader.onload = (e) => {
         selectedFiles.value.push({
           file,
           name: file.name,
           preview: e.target?.result as string
         })
+      }
+      reader.onerror = () => {
+        console.warn(`Unable to read file: ${file.name}`)
+      }
+      reader.onloadend = () => {
+        pendingReads.value = Math.max(0, pendingReads.value - 1)
       }
       reader.readAsDataURL(file)
     }
@@ -116,7 +167,14 @@ const clearAll = () => {
   selectedFiles.value = []
 }
 
-const uploadFiles = () => {
+const uploadFiles = async () => {
+  if (isUploading.value) return
+  if (pendingReads.value > 0) {
+    await waitForReads()
+  }
+  if (selectedFiles.value.length === 0) return
+  persistSelection()
+
   isUploading.value = true
   // TODO: Replace with actual upload logic in production
   // This is a simulated upload for demonstration purposes
@@ -140,13 +198,13 @@ const uploadFiles = () => {
 .upload-container {
   max-width: 1200px;
   margin: 0 auto;
-  padding: 2rem;
+  padding: 1rem 2rem 2rem 2rem;
 }
 
 h1 {
   text-align: center;
   color: #2c3e50;
-  margin-bottom: 2rem;
+  margin-bottom: 1rem;
 }
 
 .upload-area {
