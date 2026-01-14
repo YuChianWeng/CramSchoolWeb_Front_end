@@ -32,9 +32,7 @@
               ref="canvas"
               tabindex="0"
               :style="{ 
-                cursor: currentMode === 'pan' 
-                  ? (isPanning ? 'grabbing' : 'grab') 
-                  : 'crosshair',
+                cursor: getCursorStyle(),
                 outline: 'none' /* 移除聚焦時的預設黑框 */
               }"
               @mousedown="startDrawing"
@@ -91,6 +89,14 @@
               <button @click="retryPrediction" :disabled="currentImage?.isPredicting" class="retry-btn">
                 重新偵測
               </button>
+              
+              <button 
+                @click="applyLabelsToAll" 
+                :disabled="!currentImage?.labels || currentImage.labels.length === 0" 
+                class="apply-all-btn"
+              >
+                全部套用
+              </button>
             </div>
 
             <div class="label-list">
@@ -120,6 +126,7 @@
                         @focus="selectLabel(index)"
                         @keydown="handleInputKeydown(index, $event)"
                         @click.stop
+                        @input="updateRecognizedAnswer(label)"
                       />
                     </div>
                   </div>
@@ -164,6 +171,7 @@
 import { ref, computed, onMounted, watch, nextTick, onBeforeUpdate, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../constants'
+import { setResultsData } from '../stores/resultsStore'
 
 const DEFAULT_CLASS = '答案區'
 
@@ -173,7 +181,15 @@ interface Label {
   y: number
   width: number
   height: number
+  recognizedAnswer?: string
   answer?: string
+  expectedAnswer?: string
+  isCorrect?: boolean
+  // [新增] 用來暫存後端回傳的兩種結果
+  ocrCandidates?: {
+    chinese: string
+    digit: string
+  }
 }
 
 interface ImageData {
@@ -185,6 +201,9 @@ interface ImageData {
   predictionError?: string
 }
 
+const draggingLabelIndex = ref<number>(-1) // 記錄正在拖曳的標籤索引
+const dragOffset = ref({ x: 0, y: 0 })     // 記錄點擊點與框框左上角的距離
+const hoverLabelIndex = ref<number>(-1)    // 記錄滑鼠目前懸停在哪個框上 (用來變更游標)
 const router = useRouter()
 const canvas = ref<HTMLCanvasElement | null>(null)
 const images = ref<ImageData[]>([])
@@ -207,13 +226,13 @@ const inputRefs = ref<HTMLInputElement[]>([])
 
 const currentImage = computed(() => images.value[currentImageIndex.value])
 
-// [新增] 確保在列表更新前清空 refs，避免索引錯亂
+// 確保在列表更新前清空 refs
 onBeforeUpdate(() => {
   inputRefs.value = []
 })
 
 onMounted(() => {
-  // [新增] 註冊全域鍵盤監聽
+  // 註冊全域鍵盤監聽 (處理非輸入框時的刪除)
   window.addEventListener('keydown', handleGlobalKeydown)
 
   const state = history.state as { files?: ImageData[] };
@@ -238,7 +257,6 @@ onMounted(() => {
   }
 });
 
-// [新增] 移除監聽
 onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalKeydown)
 })
@@ -246,6 +264,83 @@ onUnmounted(() => {
 watch(currentImageIndex, () => {
   handleImageChange()
 })
+
+const getCursorStyle = () => {
+  if (currentMode.value === 'pan') {
+    return isPanning.value ? 'grabbing' : 'grab'
+  }
+  // 如果正在拖曳框框，顯示 'move'
+  if (draggingLabelIndex.value !== -1) {
+    return 'grabbing'
+  }
+  // 如果滑鼠指著某個框框，顯示 'move' (提示可拖曳)
+  if (hoverLabelIndex.value !== -1) {
+    return 'grab'
+  }
+  // 預設畫圖模式
+  return 'crosshair'
+}
+
+// [修改] 改名為 runOCRForImage，並接受參數，讓它可以處理任何一張圖
+const runOCRForImage = async (img: ImageData) => {
+  // 檢查傳入的圖片是否有效
+  if (!img || !img.preview || !img.labels || img.labels.length === 0) return;
+
+  try {
+    // 1. 準備資料
+    const base64Data = extractBase64FromPreview(img.preview);
+    const previewImg = await loadPreviewImage(img.preview);
+    const { scale, offsetX, offsetY } = computeFit(previewImg.width, previewImg.height);
+
+    const inputPayload = {
+      image: base64Data,
+      annotations: img.labels.map(l => ({
+        class: l.class,
+        bbox: [
+          (l.x - offsetX) / scale,
+          (l.y - offsetY) / scale,
+          ((l.x - offsetX) / scale) + (l.width / scale),
+          ((l.y - offsetY) / scale) + (l.height / scale)
+        ]
+      }))
+    };
+
+    // 2. 呼叫後端
+    const response = await fetch('/api/ocr_process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(inputPayload)
+    });
+
+    if (!response.ok) throw new Error('OCR API Error');
+    const resultData = await response.json();
+
+    // 3. 將回傳結果填入 labels
+    const results = resultData.ocr_results || resultData.results || [];
+    
+    if (Array.isArray(results)) {
+      results.forEach((res: any, index: number) => {
+        // 確保對應的 label 還存在
+        if (img.labels && img.labels[index]) {
+          const targetLabel = img.labels[index];
+          
+          // 填入候選字
+          targetLabel.ocrCandidates = {
+            chinese: String(res.chinese || ''),
+            digit: String(res.digit || '')
+          };
+
+          // [重要] 因為是背景跑，我們直接幫它執行判斷邏輯
+          updateRecognizedAnswer(targetLabel);
+        }
+      });
+      console.log(`圖片 ${img.name} 背景 OCR 完成`);
+    }
+
+  } catch (error) {
+    console.warn(`圖片 ${img.name} OCR 失敗 (不影響標註):`, error);
+  }
+};
 
 const handleImageChange = () => {
   selectedLabelIndex.value = -1 
@@ -261,24 +356,19 @@ const handleImageChange = () => {
   fetchPredictionsForCurrentImage()
 }
 
-// [新增] 全域鍵盤事件：處理非輸入框焦點時的刪除
+// 全域鍵盤事件：處理非輸入框焦點時的刪除
 const handleGlobalKeydown = (event: KeyboardEvent) => {
-  // 如果沒有選取任何標籤，不動作
   if (selectedLabelIndex.value === -1) return
 
-  // 檢查是否為刪除鍵
   if (event.key === 'Backspace' || event.key === 'Delete') {
     const activeEl = document.activeElement as HTMLElement
     
-    // 如果焦點正在某個輸入框內 (包含 Textarea 或 contentEditable)，則不執行全域刪除
-    // 這樣可以避免使用者正在打字(或修改答案)時誤刪整個框框
-    // 注意：如果是我們自己的 Label Input，它有綁定 @keydown="handleInputKeydown"，會由那裡處理「空字串才刪除」的邏輯
+    // 如果焦點正在輸入框內，不執行這裡的邏輯 (交給 handleInputKeydown)
     if (activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement || activeEl?.isContentEditable) {
       return
     }
 
-    // 如果焦點不在輸入框 (例如在 Body, Canvas, Button)，則直接刪除
-    event.preventDefault() // 防止瀏覽器上一頁等預設行為
+    event.preventDefault()
     removeLabel(selectedLabelIndex.value)
   }
 }
@@ -289,6 +379,24 @@ const computeFit = (imgWidth: number, imgHeight: number) => {
   const offsetY = (CANVAS_HEIGHT - imgHeight * scale) / 2
 
   return { scale, offsetX, offsetY }
+}
+
+// [新增] 根據輸入的答案，自動選擇要採信 OCR 的中文還是數字結果
+const updateRecognizedAnswer = (label: Label) => {
+  // 如果沒有候選資料，就跳過
+  if (!label.ocrCandidates) return
+
+  const input = label.answer ? label.answer.trim() : ''
+  
+  // 判斷邏輯：如果是純數字 (RegExp: ^\d+$)，就選 digit，否則選 chinese
+  // 你也可以改用 /[0-9]/.test(input) 只要包含數字就切換，視你的需求而定
+  const isDigit = /^\d+$/.test(input)
+
+  if (isDigit) {
+    label.recognizedAnswer = label.ocrCandidates.digit
+  } else {
+    label.recognizedAnswer = label.ocrCandidates.chinese
+  }
 }
 
 const loadPreviewImage = (preview: string) => {
@@ -361,10 +469,23 @@ const selectLabel = (index: number) => {
   }
 }
 
-// 處理輸入框內的刪除：只有當答案為空時才刪除框框 (避免打字時誤刪)
+// [修改] 處理輸入框按鍵事件：Enter 跳轉 & Backspace 刪除
 const handleInputKeydown = (index: number, event: KeyboardEvent) => {
   const label = currentImage.value?.labels?.[index]
   if (!label) return
+
+  // 1. Enter 鍵 -> 跳到下一個輸入框
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    // 檢查是否有下一個標籤
+    const nextIndex = index + 1
+    if (currentImage.value?.labels && nextIndex < currentImage.value.labels.length) {
+      focusLabelInput(nextIndex)
+    }
+    return
+  }
+
+  // 2. Backspace/Delete 鍵 -> 如果是空的則刪除框框
   if ((event.key === 'Backspace' || event.key === 'Delete') && label.answer === '') {
     event.preventDefault()
     removeLabel(index)
@@ -374,32 +495,54 @@ const handleInputKeydown = (index: number, event: KeyboardEvent) => {
 const startDrawing = (event: MouseEvent) => {
   if (!canvas.value) return
 
+  // 1. 如果是平移模式或按住 Alt，保持原樣
   if (currentMode.value === 'pan' || event.button !== 0 || event.altKey) {
     startPan(event)
     return
   }
 
   const { x, y } = getCanvasCoords(event)
-  const labels = currentImage.value?.labels || []
-  let hitIndex = -1
   
+  // [修正] 確保 labels 是一個陣列，如果是 undefined 則給空陣列
+  const labels = currentImage.value?.labels || []
+  
+  // 2. 檢查是否點擊在現有的框框上
+  let hitIndex = -1
   for (let i = labels.length - 1; i >= 0; i--) {
     const l = labels[i]
+    
+    // [修正] 紅字解決重點：如果 l 是 undefined，直接跳過這一次迴圈
     if (!l) continue; 
+
     if (x >= l.x && x <= l.x + l.width && y >= l.y && y <= l.y + l.height) {
       hitIndex = i
       break
     }
   }
 
+  // 3. 如果點到了框框 -> 進入「拖曳模式」
   if (hitIndex !== -1) {
-    focusLabelInput(hitIndex)
-    return 
-  } else {
-    if (selectedLabelIndex.value !== -1) {
-      selectedLabelIndex.value = -1
-      loadImage()
+    draggingLabelIndex.value = hitIndex
+    selectedLabelIndex.value = hitIndex
+    
+    // [修正] 紅字解決重點：先取出該 label 並檢查是否存在
+    const targetLabel = labels[hitIndex]
+    if (targetLabel) {
+      dragOffset.value = {
+        x: x - targetLabel.x,
+        y: y - targetLabel.y
+      }
     }
+    
+    focusLabelInput(hitIndex)
+    loadImage()
+    return 
+  }
+
+  // 4. 沒點到框框 -> 清除選取並開始「畫新框」
+  if (selectedLabelIndex.value !== -1) {
+    selectedLabelIndex.value = -1
+    loadImage()
   }
 
   startX.value = x
@@ -408,14 +551,47 @@ const startDrawing = (event: MouseEvent) => {
 }
 
 const draw = (event: MouseEvent) => {
+  const { x, y } = getCanvasCoords(event)
+
   if (isPanning.value) {
     handlePanMove(event)
     return
   }
 
+  // [修正] 拖曳框框的邏輯
+  if (draggingLabelIndex.value !== -1 && currentImage.value?.labels) {
+    const label = currentImage.value.labels[draggingLabelIndex.value]
+    // [修正] 確保 label 存在才執行
+    if (label) {
+      label.x = x - dragOffset.value.x
+      label.y = y - dragOffset.value.y
+      loadImage()
+    }
+    return
+  }
+
+  // [修正] 滑鼠懸停 (Hover) 效果的邏輯
+  if (!isDrawing.value && draggingLabelIndex.value === -1) {
+    const labels = currentImage.value?.labels || []
+    let found = -1
+    for (let i = labels.length - 1; i >= 0; i--) {
+      const l = labels[i]
+      // [修正] 加入 undefined 檢查
+      if (!l) continue
+
+      if (x >= l.x && x <= l.x + l.width && y >= l.y && y <= l.y + l.height) {
+        found = i
+        break
+      }
+    }
+    if (hoverLabelIndex.value !== found) {
+      hoverLabelIndex.value = found
+    }
+  }
+
+  // 畫新框邏輯 (保持原樣)
   if (!isDrawing.value || !canvas.value) return
 
-  const { x, y } = getCanvasCoords(event)
   currentX.value = x
   currentY.value = y
 
@@ -496,7 +672,8 @@ const fetchPredictionsForCurrentImage = async () => {
 
     img.labels = mappedLabels
     img.predictionsLoaded = true
-    loadImage()
+    loadImage() // [新增這一行] 框框出來後，馬上叫後端去辨識裡面的字
+    await runOCRForImage(img); // 背景跑 OCR
   } catch (error: any) {
     console.error('Error fetching predictions:', error)
     img.predictionError = error?.message || 'Unable to fetch predictions'
@@ -517,11 +694,19 @@ const retryPrediction = () => {
 }
 
 const endDrawing = () => {
+  // 1. 結束平移
   if (isPanning.value) {
     stopPan()
     return
   }
 
+  // 2. [新增] 結束框框拖曳
+  if (draggingLabelIndex.value !== -1) {
+    draggingLabelIndex.value = -1 // 重置拖曳狀態
+    return
+  }
+
+  // 3. 結束畫新框 (原本的邏輯)
   if (!isDrawing.value || !currentImage.value) return
 
   isDrawing.value = false
@@ -530,6 +715,7 @@ const endDrawing = () => {
   const height = currentY.value - startY.value
 
   if (Math.abs(width) > 10 && Math.abs(height) > 10) {
+    // ... (維持原本的新增 Label 邏輯) ...
     const label: Label = {
       class: currentClass.value,
       x: Math.min(startX.value, currentX.value),
@@ -545,10 +731,11 @@ const endDrawing = () => {
     currentImage.value.labels.push(label)
 
     focusLabelInput(currentImage.value.labels.length - 1)
+    selectedLabelIndex.value = currentImage.value.labels.length - 1 // 新增完自動選中
     loadImage()
+    runOCRForImage(currentImage.value); // [新增這一行] 手畫完框，也馬上辨識這個新框框
   }
 }
-
 const removeLabel = (index: number) => {
   const img = currentImage.value
   if (img && img.labels) {
@@ -641,6 +828,46 @@ const previousImage = () => {
   }
 }
 
+// [修改] 將當前圖片的標註套用到所有圖片 (修正：清除舊 OCR 結果並重新辨識)
+const applyLabelsToAll = async () => {
+  // 1. 基本檢查
+  if (!currentImage.value?.labels || currentImage.value.labels.length === 0) return
+
+  const confirmMsg = `確定要將目前的 ${currentImage.value.labels.length} 個標註框與答案套用到所有 ${images.value.length} 張圖片嗎？\n\n注意：這將會覆蓋其他圖片現有的標註，並在背景重新執行 OCR 辨識！`
+  if (!confirm(confirmMsg)) return
+
+  // 2. 準備「乾淨」的樣板
+  const sourceLabels = currentImage.value.labels.map(label => ({
+    ...label,
+    recognizedAnswer: undefined, // 清除辨識結果
+    ocrCandidates: undefined,    // 清除候選字
+    isCorrect: undefined         // 清除對錯狀態
+  }))
+
+  // 3. 迴圈套用
+  for (let i = 0; i < images.value.length; i++) {
+    // 跳過當前這張
+    if (i === currentImageIndex.value) continue;
+
+    const targetImg = images.value[i];
+
+    // [修正] 這裡加一行檢查，紅字就會消失！
+    if (!targetImg) continue;
+
+    // 複製標註
+    targetImg.labels = sourceLabels.map(label => ({ ...label }));
+    
+    // 設定狀態
+    targetImg.predictionsLoaded = true;
+    targetImg.predictionError = undefined;
+
+    // [關鍵] 針對這張圖片，啟動 OCR 辨識！
+    runOCRForImage(targetImg);
+  }
+
+  alert('已成功套用！系統正在背景辨識其他圖片的內容。')
+}
+
 const nextImage = () => {
   if (currentImageIndex.value < images.value.length - 1) {
     currentImageIndex.value++
@@ -673,71 +900,17 @@ const exportLabels = () => {
   URL.revokeObjectURL(url)
 }
 
-const goToResults = async () => {
-  if (!currentImage.value || isProcessingOCR.value) return;
-  
-  const img = currentImage.value;
-  const labels = img.labels || [];
-  
-  const base64Data = extractBase64FromPreview(img.preview);
-  const previewImg = await loadPreviewImage(img.preview);
-  const { scale, offsetX, offsetY } = computeFit(previewImg.width, previewImg.height);
+const goToResults = () => {
+  if (!currentImage.value) return;
 
-  const inputPayload = {
-    image: base64Data,
-    annotations: labels.map(l => ({
-      class: l.class,
-      bbox: [
-        (l.x - offsetX) / scale,
-        (l.y - offsetY) / scale,
-        ((l.x - offsetX) / scale) + (l.width / scale),
-        ((l.y - offsetY) / scale) + (l.height / scale)
-      ]
-    }))
-  };
+  // 1. 深拷貝整理資料
+  const cleanImages = JSON.parse(JSON.stringify(images.value));
 
-  const inputBlob = new Blob([JSON.stringify(inputPayload, null, 2)], { type: 'application/json' });
-  const inputLink = document.createElement('a');
-  inputLink.href = URL.createObjectURL(inputBlob);
-  inputLink.download = `input.json`;
-  inputLink.click();
-  URL.revokeObjectURL(inputLink.href);
+  // 2. 存入 Store (這裡就不會報錯了，因為上面有 import)
+  setResultsData(cleanImages);
 
-  isProcessingOCR.value = true;
-  
-  try {
-    const response = await fetch('/api/ocr_process', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(inputPayload)
-    });
-
-    if (!response.ok) throw new Error(`API 錯誤: ${response.status}`);
-    
-    const resultData = await response.json(); 
-
-    const outputBlob = new Blob([JSON.stringify(resultData, null, 2)], { type: 'application/json' });
-    const outputLink = document.createElement('a');
-    outputLink.href = URL.createObjectURL(outputBlob);
-    outputLink.download = `output.json`;
-    outputLink.click();
-    URL.revokeObjectURL(outputLink.href);
-
-    router.push({ 
-      name: 'results', 
-      state: { 
-        ocrResults: resultData,
-        imageName: currentImage.value?.name,
-        allImages: images.value
-      } 
-    });
-
-  } catch (error: any) {
-    console.error('OCR 失敗:', error);
-    alert('辨識失敗，請檢查網路面板或後端 Log');
-  } finally {
-    isProcessingOCR.value = false;
-  }
+  // 3. 換頁
+  router.push({ name: 'results' });
 };
 </script>
 
@@ -958,6 +1131,31 @@ canvas {
 
 .state.idle {
   color: #666;
+}
+
+.apply-all-btn {
+  background-color: #673ab7; /* 紫色，代表批次處理 */
+  color: #fff;
+  border: none;
+  padding: 0.4rem 0.8rem; /* 稍微大一點點 */
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  margin-left: 10px; /* 與左邊按鈕拉開距離 */
+  transition: background-color 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.apply-all-btn:hover {
+  background-color: #5e35b1;
+}
+
+.apply-all-btn:disabled {
+  background-color: #b39ddb;
+  cursor: not-allowed;
+  opacity: 0.7;
 }
 
 .retry-btn {
