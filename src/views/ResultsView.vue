@@ -1,121 +1,127 @@
 <template>
-  <div class="results-container">
-    <h1>Labeling Results</h1>
-    
-    <div v-if="images.length === 0" class="no-results">
-      <p>No results to display. Please label images first.</p>
-      <button @click="goToLabel" class="label-link-btn">Go to Label Page</button>
+  <div class="results-page">
+    <div class="page-header">
+      <div>
+        <p class="eyebrow">Result</p>
+        <h1>每張的對比情形</h1>
+        <p class="subtext">顯示 YOLO 標籤配對正確答案的數量，並快速回顧 OCR 辨識結果。</p>
+      </div>
+      <div class="header-actions">
+        <button class="ghost-btn" @click="goToUpload">重新上傳</button>
+        <button class="primary-btn" @click="goToLabel">返回標記</button>
+      </div>
     </div>
 
-    <div v-else class="results-content">
-      <div class="summary">
-        <h2>Summary</h2>
-        <div class="stats">
-          <div class="stat-item">
-            <span class="stat-label">Total Images:</span>
-            <span class="stat-value">{{ images.length }}</span>
-          </div>
-          <div class="stat-item">
-            <span class="stat-label">Total Labels:</span>
-            <span class="stat-value">{{ totalLabels }}</span>
-          </div>
-          <div class="stat-item">
-            <span class="stat-label">Average Labels per Image:</span>
-            <span class="stat-value">{{ averageLabels }}</span>
-          </div>
-        </div>
-
-        <div class="class-distribution">
-          <h3>Class Distribution</h3>
-          <div class="chart">
-            <div 
-              v-for="(count, className) in classDistribution" 
-              :key="className"
-              class="chart-bar"
-            >
-              <div class="bar-label">{{ className }}</div>
-              <div class="bar-wrapper">
-                <div 
-                  class="bar-fill" 
-                  :style="{ width: (count / maxClassCount * 100) + '%' }"
-                ></div>
-                <span class="bar-count">{{ count }}</span>
-              </div>
-            </div>
-          </div>
-        </div>
+    <div v-if="scoredImages.length === 0" class="empty-state">
+      <p>目前沒有批改結果，請先完成標記與批改。</p>
+      <div class="empty-actions">
+        <button class="primary-btn" @click="goToUpload">上傳照片</button>
+        <button class="ghost-btn" @click="goToLabel">回到標記頁</button>
       </div>
+    </div>
 
-      <div class="image-results">
-        <h2>Labeled Images</h2>
+    <div v-else class="results-body">
+      <section class="image-section">
+        <div class="section-header">
+          <div>
+            <h2>Preview</h2>
+            <p class="subtext">「正確標籤數 / 標籤總數」。</p>
+          </div>
+        </div>
+
         <div class="image-grid">
-          <div 
-            v-for="(img, index) in images" 
-            :key="index"
-            class="result-item"
-            @click="viewDetails(index)"
+          <article
+            v-for="(img, idx) in scoredImages"
+            :key="img.name"
+            class="image-card"
+            role="button"
+            tabindex="0"
+            @click="openModal(idx)"
           >
-            <div class="result-image">
-              <img :src="img.preview" :alt="img.name" />
-              <div class="label-overlay">
-                {{ img.labels?.length || 0 }} labels
-              </div>
-            </div>
-            <div class="result-info">
-              <h4>{{ img.name }}</h4>
-              <div v-if="img.labels && img.labels.length > 0" class="label-tags">
-                <span 
-                  v-for="(label, labelIndex) in img.labels" 
-                  :key="labelIndex"
-                  class="label-tag"
-                >
-                  {{ label.class }}
+            <div class="thumb">
+              <img :src="img.preview || placeholderImage" :alt="img.name" />
+              <div class="overlay">
+                <span class="fraction">{{ img.correctCount }}/{{ img.totalLabels }}</span>
+                <span class="badge" :class="img.graded ? 'badge-graded' : 'badge-pending'">
+                  {{ img.graded ? '已批改' : '待批改' }}
                 </span>
               </div>
-              <p v-else class="no-labels-text">No labels</p>
+              <div class="box-layer" v-if="img.labels.length">
+                <div
+                  v-for="(label, idx) in img.labels"
+                  :key="idx"
+                  class="bbox"
+                  :class="label.isCorrect === true ? 'bbox-correct' : label.isCorrect === false ? 'bbox-wrong' : 'bbox-pending'"
+                  :style="boxStyle(label)"
+                ></div>
+              </div>
             </div>
+            <div class="card-body">
+              <div class="card-title">
+                <h3>{{ img.name }}</h3>
+                <div class="title-metrics">
+                  <span class="fraction inline">{{ img.correctCount }}/{{ img.totalLabels }}</span>
+                  <span class="accuracy">{{ img.graded ? img.accuracy + '%' : '尚未批改' }}</span>
+                </div>
+              </div>
+              <div v-if="img.labels.length" class="answers">
+                <div
+                  v-for="(label, idx) in img.labels"
+                  :key="idx"
+                  class="answer-row"
+                >
+                  <span class="answer-index">#{{ idx + 1 }}</span>
+                  <span class="answer-text">OCR：{{ label.recognizedAnswer || '—' }}</span>
+                  <span class="answer-text">正解：{{ label.expectedAnswer || label.answer || '—' }}</span>
+                  <span class="answer-chip" :class="label.isCorrect ? 'chip-correct' : label.isCorrect === false ? 'chip-wrong' : 'chip-pending'">
+                    {{ label.isCorrect === undefined ? '未判定' : label.isCorrect ? '正確' : '錯誤' }}
+                  </span>
+                </div>
+              </div>
+              <div class="card-meta">
+                
+                <span>正確 <strong>{{ img.correctCount }}</strong></span>
+                <span>錯誤 <strong>{{ img.incorrectCount }}</strong></span>
+                <span>標籤總數 <strong>{{ img.totalLabels }}</strong></span>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div v-if="selectedImage" class="modal" @click="closeModal">
+    <div class="modal-content" @click.stop>
+      <button class="modal-close" @click="closeModal">×</button>
+      <h3>{{ selectedImage.name }}</h3>
+      <div class="modal-image-wrap">
+        <img :src="selectedImage.preview || placeholderImage" :alt="selectedImage.name" />
+        <div class="box-layer" v-if="selectedImage.labels.length">
+          <div
+            v-for="(label, idx) in selectedImage.labels"
+            :key="idx"
+            class="bbox"
+            :class="label.isCorrect === true ? 'bbox-correct' : label.isCorrect === false ? 'bbox-wrong' : 'bbox-pending'"
+            :style="boxStyle(label)"
+          >
+            <span class="bbox-tag">#{{ idx + 1 }} {{ label.recognizedAnswer || '—' }}</span>
           </div>
         </div>
       </div>
 
-      <div class="actions">
-        <button @click="downloadResults" class="download-btn">
-          📥 Download YOLO Format
-        </button>
-        <button @click="downloadJSON" class="download-btn">
-          📄 Download JSON
-        </button>
-        <button @click="goToLabel" class="back-btn">
-          ← Back to Labeling
-        </button>
-        <button @click="goToUpload" class="upload-btn">
-          📁 Upload New Images
-        </button>
-      </div>
-    </div>
-
-    <!-- Details Modal -->
-    <div v-if="selectedImage !== null && images[selectedImage]" class="modal" @click="closeModal">
-      <div class="modal-content" @click.stop>
-        <button class="modal-close" @click="closeModal">×</button>
-        <h3>{{ images[selectedImage]!.name }}</h3>
-        <img :src="images[selectedImage]!.preview" :alt="images[selectedImage]!.name" class="modal-image" />
-        <div class="modal-labels">
-          <h4>Labels ({{ images[selectedImage]!.labels?.length || 0 }}):</h4>
-          <div v-if="images[selectedImage]!.labels && images[selectedImage]!.labels!.length > 0">
-            <div 
-              v-for="(label, index) in images[selectedImage]!.labels" 
-              :key="index"
-              class="modal-label-item"
-            >
-              <span class="modal-label-class">{{ label.class }}</span>
-              <span class="modal-label-coords">
-                Position: ({{ Math.round(label.x) }}, {{ Math.round(label.y) }}) | 
-                Size: {{ Math.round(label.width) }}×{{ Math.round(label.height) }}px
-              </span>
-            </div>
-          </div>
-          <p v-else>No labels for this image</p>
+      <div v-if="selectedImage.labels.length" class="answers modal-answers">
+        <div
+          v-for="(label, idx) in selectedImage.labels"
+          :key="idx"
+          class="answer-row"
+        >
+          <span class="answer-index">#{{ idx + 1 }}</span>
+          <span class="answer-text">OCR：{{ label.recognizedAnswer || '—' }}</span>
+          <span class="answer-text">正解：{{ label.expectedAnswer || label.answer || '—' }}</span>
+          <span class="answer-chip" :class="label.isCorrect ? 'chip-correct' : label.isCorrect === false ? 'chip-wrong' : 'chip-pending'">
+            {{ label.isCorrect === undefined ? '未判定' : label.isCorrect ? '正確' : '錯誤' }}
+          </span>
         </div>
       </div>
     </div>
@@ -123,469 +129,655 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { CANVAS_WIDTH, CANVAS_HEIGHT, CLASS_MAP } from '../constants'
+import { getResultsData } from '../stores/resultsStore'
 
-interface Label {
-  class: string
-  x: number
-  y: number
-  width: number
-  height: number
+interface LabelResult {
+  recognizedAnswer?: string
+  expectedAnswer?: string
+  answer?: string
+  isCorrect?: boolean
+  x?: number
+  y?: number
+  width?: number
+  height?: number
 }
 
-interface ImageData {
+interface IncomingImage {
   name: string
+  preview?: string
+  labels?: LabelResult[]
+  correctCount?: number
+  totalLabels?: number
+}
+
+interface NormalizedImage extends IncomingImage {
   preview: string
-  labels?: Label[]
+  labels: LabelResult[]
+  correctCount: number
+  totalLabels: number
+  incorrectCount: number
+  accuracy: number
+  graded: boolean
 }
 
 const router = useRouter()
-const images = ref<ImageData[]>([])
-const selectedImage = ref<number | null>(null)
-const savedImages = ref<any[]>([]); // ✅ 加上類型定義，避免後續使用報錯
+const scoredImages = ref<NormalizedImage[]>([])
+const selectedIndex = ref<number | null>(null)
+const placeholderImage =
+  'data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"200\" viewBox=\"0 0 320 200\" fill=\"none\"><rect width=\"320\" height=\"200\" rx=\"12\" fill=\"%23e8f5e9\"/><text x=\"50%\" y=\"50%\" dominant-baseline=\"middle\" text-anchor=\"middle\" font-family=\"Arial\" font-size=\"16\" fill=\"%23666\">預覽圖片</text></svg>'
+const BASE_CANVAS_WIDTH = 800
+const BASE_CANVAS_HEIGHT = 600
+
+const extractTextValue = (value: any, seen = new Set<any>()): string => {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value)
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0 ? extractTextValue(value[0], seen) : ''
+  }
+  if (typeof value === 'object') {
+    if (seen.has(value)) return ''
+    seen.add(value)
+    const candidate =
+      value.text ??
+      value.words ??
+      value.word ??
+      value.label ??
+      value.content ??
+      value.result ??
+      value.prediction ??
+      value.ocr ??
+      value.value ??
+      value.answer ??
+      value.recognizedAnswer ??
+      value.data?.text ??
+      value.data?.words ??
+      value.data?.word ??
+      value.data?.label ??
+      value.data?.result ??
+      value.data?.prediction ??
+      value.data?.ocr
+    if (candidate !== undefined && candidate !== null) {
+      return candidate === value ? '' : extractTextValue(candidate, seen)
+    }
+    for (const key of Object.keys(value)) {
+      const found = extractTextValue((value as Record<string, any>)[key], seen)
+      if (found) return found
+    }
+  }
+  return ''
+}
+
+const normalizeAnswer = (value?: any) => extractTextValue(value).trim()
+
+const extractOcrResultsArray = (payload: any) => {
+  const results =
+    payload?.ocr_results ??
+    payload?.ocrResults ??
+    payload?.results ??
+    payload?.data?.ocr_results ??
+    payload?.body?.json?.ocr_results
+
+  if (!Array.isArray(results)) return null
+  return results.map((value) => normalizeAnswer(value))
+}
+
+const mergeOcrResultsWithImages = (
+  images: IncomingImage[],
+  ocrPayload: any,
+  imageName?: string
+) => {
+  const ocrResults = extractOcrResultsArray(ocrPayload)
+  if (!ocrResults) return images
+
+  let targetIndex = imageName
+    ? images.findIndex((img) => img.name === imageName)
+    : images.length === 1
+      ? 0
+      : -1
+
+  if (targetIndex === -1 && images.length > 0) {
+    targetIndex = 0
+  }
+
+  return images.map((img, index) => {
+    if (index !== targetIndex) return img
+    const labels = (img.labels ?? []).map((label, labelIndex) => ({
+      ...label,
+      recognizedAnswer: normalizeAnswer(ocrResults[labelIndex] ?? label.recognizedAnswer)
+    }))
+    return { ...img, labels }
+  })
+}
+
+const normalizeImage = (img: IncomingImage): NormalizedImage => {
+  const labels = (img.labels ?? []).map((label) => {
+    const normalizedRecognized = normalizeAnswer(label.recognizedAnswer)
+    const normalizedAnswer = normalizeAnswer(label.answer)
+    const expectedAnswer =
+      normalizedAnswer || normalizeAnswer(label.expectedAnswer)
+    let isCorrect = label.isCorrect
+    if (typeof isCorrect !== 'boolean' && expectedAnswer && normalizedRecognized) {
+      isCorrect = normalizedRecognized === normalizeAnswer(expectedAnswer)
+    }
+    return {
+      ...label,
+      recognizedAnswer: normalizedRecognized,
+      answer: normalizedAnswer,
+      expectedAnswer,
+      isCorrect
+    }
+  })
+  const gradedLabels = labels.filter(label => typeof label.isCorrect === 'boolean')
+  const providedCorrect = typeof img.correctCount === 'number' ? img.correctCount : null
+  const totalLabels = typeof img.totalLabels === 'number' ? img.totalLabels : labels.length
+  const derivedCorrect = gradedLabels.filter(label => label.isCorrect).length
+  const correctCount = gradedLabels.length > 0 ? derivedCorrect : providedCorrect ?? derivedCorrect
+  const boundedCorrect = Math.min(Math.max(correctCount, 0), totalLabels || Number.MAX_SAFE_INTEGER)
+  const graded = providedCorrect !== null || gradedLabels.length > 0
+  const accuracy = totalLabels > 0 ? Math.round((boundedCorrect / totalLabels) * 100) : 0
+  const incorrectCount = Math.max(totalLabels - boundedCorrect, 0)
+
+  return {
+    ...img,
+    preview: img.preview || '',
+    labels,
+    correctCount: boundedCorrect,
+    totalLabels,
+    incorrectCount,
+    accuracy,
+    graded
+  }
+}
+
+const STORAGE_KEY = 'results-page-data'
+
+const loadResultsFromState = () => {
+  const cachedInMemory = getResultsData()
+  if (cachedInMemory && cachedInMemory.length > 0) {
+    scoredImages.value = cachedInMemory.map(normalizeImage)
+    return
+  }
+  const state = history.state as {
+    results?: IncomingImage[]
+    images?: IncomingImage[]
+    allImages?: IncomingImage[]
+    ocrResults?: any
+    imageName?: string
+    state?: {
+      results?: IncomingImage[]
+      images?: IncomingImage[]
+      allImages?: IncomingImage[]
+      ocrResults?: any
+      imageName?: string
+    }
+  }
+
+  const nestedState = state?.state
+  const ocrPayload = state?.ocrResults || nestedState?.ocrResults
+  const ocrImages = state?.allImages || state?.images || nestedState?.allImages || nestedState?.images
+  const ocrImageName = state?.imageName || nestedState?.imageName
+
+  if (ocrPayload && ocrImages && ocrImages.length > 0) {
+    const merged = mergeOcrResultsWithImages(ocrImages, ocrPayload, ocrImageName)
+    scoredImages.value = merged.map(normalizeImage)
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
+    return
+  }
+
+  const payload =
+    state?.results || state?.images || nestedState?.results || nestedState?.images
+
+  if (payload && payload.length > 0) {
+    scoredImages.value = payload.map(normalizeImage)
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
+    return
+  }
+
+  const cached = sessionStorage.getItem(STORAGE_KEY)
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached) as IncomingImage[]
+      scoredImages.value = parsed.map(normalizeImage)
+      return
+    } catch (err) {
+      console.warn('Unable to parse cached results', err)
+    }
+  }
+
+  scoredImages.value = []
+}
 
 onMounted(() => {
-  // Try to get images from router state
-  const state = history.state as { images?: ImageData[] }
-  if (state?.images && state.images.length > 0) {
-    images.value = state.images
-  }
+  loadResultsFromState()
 })
-
-const totalLabels = computed(() => {
-  return images.value.reduce((sum, img) => sum + (img.labels?.length || 0), 0)
-})
-
-const averageLabels = computed(() => {
-  if (images.value.length === 0) return '0.0'
-  return (totalLabels.value / images.value.length).toFixed(1)
-})
-
-const classDistribution = computed(() => {
-  const distribution: Record<string, number> = {}
-  images.value.forEach(img => {
-    img.labels?.forEach(label => {
-      distribution[label.class] = (distribution[label.class] || 0) + 1
-    })
-  })
-  return distribution
-})
-
-const maxClassCount = computed(() => {
-  const counts = Object.values(classDistribution.value)
-  return counts.length > 0 ? Math.max(...counts) : 1
-})
-
-const viewDetails = (index: number) => {
-  selectedImage.value = index
-}
-
-const closeModal = () => {
-  selectedImage.value = null
-}
 
 const goToLabel = () => {
   router.push({
-    name: 'label', 
-    state: {
-      files: savedImages.value
-    }
-  });
+    name: 'label',
+    state: { files: scoredImages.value }
+  })
 }
 
 const goToUpload = () => {
   router.push({ name: 'upload' })
 }
 
-const downloadResults = () => {
-  // Convert to YOLO format (normalized coordinates)
-  let yoloContent = ''
-  
-  images.value.forEach(img => {
-    const labels = img.labels || []
-    const fileName = img.name.replace(/\.[^/.]+$/, '.txt')
-    
-    let fileContent = ''
-    labels.forEach(label => {
-      // For YOLO format: class_id center_x center_y width height (all normalized 0-1)
-      // Using canvas dimensions for normalization
-      const centerX = (label.x + label.width / 2) / CANVAS_WIDTH
-      const centerY = (label.y + label.height / 2) / CANVAS_HEIGHT
-      const normWidth = label.width / CANVAS_WIDTH
-      const normHeight = label.height / CANVAS_HEIGHT
-      
-      const classId = CLASS_MAP[label.class] ?? CLASS_MAP['other']
-      
-      fileContent += `${classId} ${centerX.toFixed(6)} ${centerY.toFixed(6)} ${normWidth.toFixed(6)} ${normHeight.toFixed(6)}\n`
-    })
-    
-    yoloContent += `\n=== ${fileName} ===\n${fileContent}`
-  })
-  
-  // Create and download file
-  const blob = new Blob([yoloContent], { type: 'text/plain' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = 'yolo_annotations.txt'
-  a.click()
-  URL.revokeObjectURL(url)
+const boxStyle = (label: LabelResult) => {
+  const x = label.x ?? 0
+  const y = label.y ?? 0
+  const w = label.width ?? 0
+  const h = label.height ?? 0
+  const left = (x / BASE_CANVAS_WIDTH) * 100
+  const top = (y / BASE_CANVAS_HEIGHT) * 100
+  const width = (w / BASE_CANVAS_WIDTH) * 100
+  const height = (h / BASE_CANVAS_HEIGHT) * 100
+
+  return {
+    left: `${left}%`,
+    top: `${top}%`,
+    width: `${width}%`,
+    height: `${height}%`
+  }
 }
 
-const downloadJSON = () => {
-  const jsonData = images.value.map(img => ({
-    image: img.name,
-    labels: img.labels || [],
-    label_count: img.labels?.length || 0
-  }))
-  
-  const blob = new Blob([JSON.stringify(jsonData, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = 'annotations.json'
-  a.click()
-  URL.revokeObjectURL(url)
+const openModal = (idx: number) => {
+  selectedIndex.value = idx
 }
+
+const closeModal = () => {
+  selectedIndex.value = null
+}
+
+const selectedImage = computed(() =>
+  selectedIndex.value !== null ? scoredImages.value[selectedIndex.value] : null
+)
 </script>
 
 <style scoped>
-.results-container {
-  max-width: 1400px;
+.results-page {
+  max-width: 1280px;
   margin: 0 auto;
-  padding: 1rem 2rem 2rem 2rem;
-}
-
-h1 {
-  text-align: center;
-  color: #2c3e50;
-  margin-bottom: 1rem;
-}
-
-.no-results {
-  text-align: center;
-  padding: 4rem;
-}
-
-.no-results p {
-  font-size: 1.2rem;
-  color: #666;
-  margin-bottom: 1rem;
-}
-
-.label-link-btn {
-  background-color: #42b883;
-  color: white;
-  border: none;
-  padding: 0.75rem 2rem;
-  font-size: 1rem;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: background-color 0.3s;
-}
-
-.label-link-btn:hover {
-  background-color: #35945d;
-}
-
-.results-content {
-  display: flex;
-  flex-direction: column;
-  gap: 2rem;
-}
-
-.summary {
-  background-color: #f5f5f5;
-  border-radius: 8px;
   padding: 2rem;
 }
 
-.summary h2 {
-  color: #2c3e50;
-  margin-bottom: 1rem;
-}
-
-.stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
   gap: 1rem;
-  margin-bottom: 2rem;
+  margin-bottom: 1.5rem;
 }
 
-.stat-item {
-  background-color: white;
-  padding: 1.5rem;
-  border-radius: 8px;
-  text-align: center;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-}
-
-.stat-label {
-  display: block;
-  font-size: 0.875rem;
-  color: #666;
-  margin-bottom: 0.5rem;
-}
-
-.stat-value {
-  display: block;
-  font-size: 2rem;
-  font-weight: bold;
+.eyebrow {
+  margin: 0;
   color: #42b883;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  font-size: 0.85rem;
 }
 
-.class-distribution h3 {
-  color: #2c3e50;
-  margin-bottom: 1rem;
+h1 {
+  margin: 0.25rem 0;
+  color: #1f2d3d;
+  font-size: 1.75rem;
 }
 
-.chart {
-  background-color: white;
-  padding: 1rem;
+.subtext {
+  margin: 0;
+  color: #5f6b7a;
+}
+
+.header-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.primary-btn,
+.ghost-btn {
   border-radius: 8px;
+  padding: 0.65rem 1.25rem;
+  font-size: 0.95rem;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.2s ease;
 }
 
-.chart-bar {
-  margin-bottom: 1rem;
+.primary-btn {
+  background: linear-gradient(135deg, #42b883, #2f9b6f);
+  color: white;
+  border-color: #2f9b6f;
 }
 
-.bar-label {
-  font-size: 0.875rem;
-  color: #666;
-  margin-bottom: 0.25rem;
-  text-transform: capitalize;
+.primary-btn:hover {
+  filter: brightness(0.95);
 }
 
-.bar-wrapper {
+.ghost-btn {
+  background: white;
+  color: #1f2d3d;
+  border-color: #d7dee5;
+}
+
+.ghost-btn:hover {
+  background: #eef4f8;
+}
+
+.empty-state {
+  background: white;
+  border: 1px dashed #d7dee5;
+  border-radius: 12px;
+  padding: 2rem;
+  text-align: center;
+  color: #5f6b7a;
+}
+
+.empty-actions {
+  margin-top: 1rem;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+}
+
+.results-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.image-section {
+  background: white;
+  border: 1px solid #e4e9ed;
+  border-radius: 12px;
+  padding: 1.25rem;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.04);
+}
+
+.section-header {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-}
-
-.bar-fill {
-  height: 24px;
-  background-color: #42b883;
-  border-radius: 4px;
-  transition: width 0.3s ease;
-  min-width: 2px;
-}
-
-.bar-count {
-  font-weight: bold;
-  color: #2c3e50;
-}
-
-.image-results h2 {
-  color: #2c3e50;
+  justify-content: space-between;
   margin-bottom: 1rem;
+}
+
+.section-header h2 {
+  margin: 0;
+  color: #1f2d3d;
 }
 
 .image-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 1.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.75rem;
 }
 
-.result-item {
-  background-color: white;
-  border-radius: 8px;
+.image-card {
+  border: 1px solid #e4e9ed;
+  border-radius: 12px;
   overflow: hidden;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  cursor: pointer;
-  transition: transform 0.3s, box-shadow 0.3s;
+  background: #fdfefe;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.04);
+  display: flex;
+  flex-direction: column;
 }
 
-.result-item:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-}
-
-.result-image {
+.thumb {
   position: relative;
-  width: 100%;
-  height: 200px;
+  background: #eef4f8;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
 }
 
-.result-image img {
+.thumb img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  display: block;
+  object-fit: contain;
 }
 
-.label-overlay {
+.overlay {
   position: absolute;
-  top: 0.5rem;
-  right: 0.5rem;
-  background-color: rgba(66, 184, 131, 0.9);
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: space-between;
+  padding: 12px;
+  pointer-events: none;
+}
+
+.box-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.bbox {
+  position: absolute;
+  border: 2px solid rgba(0, 0, 0, 0.4);
+  box-sizing: border-box;
+}
+
+.bbox-correct {
+  border-color: #2f9b6f;
+}
+
+.bbox-wrong {
+  border-color: #d93025;
+}
+
+.bbox-pending {
+  border-color: #ff9800;
+}
+
+.fraction {
+  background: rgba(31, 45, 61, 0.8);
   color: white;
-  padding: 0.25rem 0.75rem;
-  border-radius: 4px;
-  font-size: 0.875rem;
-  font-weight: bold;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  font-weight: 700;
 }
 
-.result-info {
+.fraction.inline {
+  background: #eef4f8;
+  color: #1f2d3d;
+}
+
+.badge {
+  padding: 0.35rem 0.65rem;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 0.8rem;
+  color: white;
+}
+
+.badge-graded {
+  background: #42b883;
+}
+
+.badge-pending {
+  background: #ff9800;
+}
+
+.card-body {
   padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
-.result-info h4 {
-  color: #2c3e50;
-  margin-bottom: 0.5rem;
-  font-size: 1rem;
+.card-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.card-title h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  color: #1f2d3d;
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.label-tags {
+.accuracy {
+  background: #eef4f8;
+  color: #1f2d3d;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.title-metrics {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   gap: 0.5rem;
 }
 
-.label-tag {
-  background-color: #e8f5e9;
-  color: #42b883;
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  font-weight: bold;
-  text-transform: capitalize;
-}
-
-.no-labels-text {
-  color: #999;
-  font-style: italic;
-  font-size: 0.875rem;
-}
-
-.actions {
+.card-meta {
   display: flex;
   gap: 1rem;
-  justify-content: center;
   flex-wrap: wrap;
+  color: #5f6b7a;
+  font-size: 0.9rem;
 }
 
-.download-btn,
-.back-btn,
-.upload-btn {
-  padding: 0.75rem 1.5rem;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 1rem;
-  transition: background-color 0.3s;
+.card-meta strong {
+  color: #1f2d3d;
 }
 
-.download-btn {
-  background-color: #2196f3;
-  color: white;
+.answers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
 }
 
-.download-btn:hover {
-  background-color: #1976d2;
+.answer-row {
+  display: grid;
+  grid-template-columns: 70px 1fr 1fr 90px;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.9rem;
 }
 
-.back-btn {
-  background-color: #666;
-  color: white;
+.answer-index {
+  font-weight: 700;
+  color: #1f2d3d;
 }
 
-.back-btn:hover {
-  background-color: #555;
+.answer-text {
+  color: #4a5563;
 }
 
-.upload-btn {
-  background-color: #42b883;
-  color: white;
+.answer-chip {
+  display: inline-block;
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+  font-weight: 700;
+  text-align: center;
 }
 
-.upload-btn:hover {
-  background-color: #35945d;
+.chip-correct {
+  background: #e8f5e9;
+  color: #2f9b6f;
 }
 
-/* Modal Styles */
+.chip-wrong {
+  background: #fdecea;
+  color: #d93025;
+}
+
+.chip-pending {
+  background: #fff7e6;
+  color: #c47c00;
+}
+
 .modal {
   position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background-color: rgba(0, 0, 0, 0.8);
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
   display: flex;
-  justify-content: center;
   align-items: center;
+  justify-content: center;
   z-index: 1000;
+  padding: 1rem;
 }
 
 .modal-content {
-  background-color: white;
-  border-radius: 8px;
-  padding: 2rem;
-  max-width: 800px;
+  background: white;
+  border-radius: 12px;
+  padding: 1.25rem;
+  max-width: 1100px;
+  width: 100%;
   max-height: 90vh;
   overflow-y: auto;
   position: relative;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.2);
 }
 
 .modal-close {
   position: absolute;
-  top: 1rem;
-  right: 1rem;
-  background-color: #ff5252;
-  color: white;
+  top: 10px;
+  right: 10px;
   border: none;
+  background: #ff5252;
+  color: white;
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  font-size: 1.5rem;
+  font-size: 1.2rem;
   cursor: pointer;
-  line-height: 1;
-  transition: background-color 0.3s;
 }
 
-.modal-close:hover {
-  background-color: #d32f2f;
-}
-
-.modal-content h3 {
-  color: #2c3e50;
-  margin-bottom: 1rem;
-}
-
-.modal-image {
+.modal-image-wrap {
+  position: relative;
+  background: #f8fafc;
+  border: 1px solid #e4e9ed;
+  border-radius: 8px;
+  overflow: hidden;
   width: 100%;
-  max-height: 400px;
+  max-width: 800px;
+  aspect-ratio: 4 / 3;
+  margin: 0 auto;
+}
+
+.modal-image-wrap img {
+  width: 100%;
+  height: 100%;
+  display: block;
   object-fit: contain;
-  border-radius: 4px;
-  margin-bottom: 1rem;
 }
 
-.modal-labels h4 {
-  color: #2c3e50;
-  margin-bottom: 0.5rem;
+.bbox-tag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  background: rgba(31, 45, 61, 0.8);
+  color: white;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.8rem;
+  border-bottom-right-radius: 6px;
 }
 
-.modal-label-item {
-  background-color: #f5f5f5;
-  padding: 0.75rem;
-  border-radius: 4px;
-  margin-bottom: 0.5rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
+.modal-answers {
+  margin-top: 1rem;
 }
 
-.modal-label-class {
-  font-weight: bold;
-  color: #42b883;
-  text-transform: capitalize;
-}
+@media (max-width: 768px) {
+  .page-header {
+    flex-direction: column;
+  }
 
-.modal-label-coords {
-  font-size: 0.875rem;
-  color: #666;
+  .header-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
 }
 </style>

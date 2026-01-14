@@ -126,6 +126,7 @@
                         @focus="selectLabel(index)"
                         @keydown="handleInputKeydown(index, $event)"
                         @click.stop
+                        @input="updateRecognizedAnswer(label)"
                       />
                     </div>
                   </div>
@@ -170,6 +171,7 @@
 import { ref, computed, onMounted, watch, nextTick, onBeforeUpdate, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../constants'
+import { setResultsData } from '../stores/resultsStore'
 
 const DEFAULT_CLASS = '答案區'
 
@@ -179,7 +181,15 @@ interface Label {
   y: number
   width: number
   height: number
+  recognizedAnswer?: string
   answer?: string
+  expectedAnswer?: string
+  isCorrect?: boolean
+  // [新增] 用來暫存後端回傳的兩種結果
+  ocrCandidates?: {
+    chinese: string
+    digit: string
+  }
 }
 
 interface ImageData {
@@ -271,6 +281,67 @@ const getCursorStyle = () => {
   return 'crosshair'
 }
 
+// [修改] 改名為 runOCRForImage，並接受參數，讓它可以處理任何一張圖
+const runOCRForImage = async (img: ImageData) => {
+  // 檢查傳入的圖片是否有效
+  if (!img || !img.preview || !img.labels || img.labels.length === 0) return;
+
+  try {
+    // 1. 準備資料
+    const base64Data = extractBase64FromPreview(img.preview);
+    const previewImg = await loadPreviewImage(img.preview);
+    const { scale, offsetX, offsetY } = computeFit(previewImg.width, previewImg.height);
+
+    const inputPayload = {
+      image: base64Data,
+      annotations: img.labels.map(l => ({
+        class: l.class,
+        bbox: [
+          (l.x - offsetX) / scale,
+          (l.y - offsetY) / scale,
+          ((l.x - offsetX) / scale) + (l.width / scale),
+          ((l.y - offsetY) / scale) + (l.height / scale)
+        ]
+      }))
+    };
+
+    // 2. 呼叫後端
+    const response = await fetch('/api/ocr_process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(inputPayload)
+    });
+
+    if (!response.ok) throw new Error('OCR API Error');
+    const resultData = await response.json();
+
+    // 3. 將回傳結果填入 labels
+    const results = resultData.ocr_results || resultData.results || [];
+    
+    if (Array.isArray(results)) {
+      results.forEach((res: any, index: number) => {
+        // 確保對應的 label 還存在
+        if (img.labels && img.labels[index]) {
+          const targetLabel = img.labels[index];
+          
+          // 填入候選字
+          targetLabel.ocrCandidates = {
+            chinese: String(res.chinese || ''),
+            digit: String(res.digit || '')
+          };
+
+          // [重要] 因為是背景跑，我們直接幫它執行判斷邏輯
+          updateRecognizedAnswer(targetLabel);
+        }
+      });
+      console.log(`圖片 ${img.name} 背景 OCR 完成`);
+    }
+
+  } catch (error) {
+    console.warn(`圖片 ${img.name} OCR 失敗 (不影響標註):`, error);
+  }
+};
+
 const handleImageChange = () => {
   selectedLabelIndex.value = -1 
   inputRefs.value = [] 
@@ -308,6 +379,24 @@ const computeFit = (imgWidth: number, imgHeight: number) => {
   const offsetY = (CANVAS_HEIGHT - imgHeight * scale) / 2
 
   return { scale, offsetX, offsetY }
+}
+
+// [新增] 根據輸入的答案，自動選擇要採信 OCR 的中文還是數字結果
+const updateRecognizedAnswer = (label: Label) => {
+  // 如果沒有候選資料，就跳過
+  if (!label.ocrCandidates) return
+
+  const input = label.answer ? label.answer.trim() : ''
+  
+  // 判斷邏輯：如果是純數字 (RegExp: ^\d+$)，就選 digit，否則選 chinese
+  // 你也可以改用 /[0-9]/.test(input) 只要包含數字就切換，視你的需求而定
+  const isDigit = /^\d+$/.test(input)
+
+  if (isDigit) {
+    label.recognizedAnswer = label.ocrCandidates.digit
+  } else {
+    label.recognizedAnswer = label.ocrCandidates.chinese
+  }
 }
 
 const loadPreviewImage = (preview: string) => {
@@ -583,7 +672,8 @@ const fetchPredictionsForCurrentImage = async () => {
 
     img.labels = mappedLabels
     img.predictionsLoaded = true
-    loadImage()
+    loadImage() // [新增這一行] 框框出來後，馬上叫後端去辨識裡面的字
+    await runOCRForImage(img); // 背景跑 OCR
   } catch (error: any) {
     console.error('Error fetching predictions:', error)
     img.predictionError = error?.message || 'Unable to fetch predictions'
@@ -643,6 +733,7 @@ const endDrawing = () => {
     focusLabelInput(currentImage.value.labels.length - 1)
     selectedLabelIndex.value = currentImage.value.labels.length - 1 // 新增完自動選中
     loadImage()
+    runOCRForImage(currentImage.value); // [新增這一行] 手畫完框，也馬上辨識這個新框框
   }
 }
 const removeLabel = (index: number) => {
@@ -737,33 +828,44 @@ const previousImage = () => {
   }
 }
 
-// [新增] 將當前圖片的標註套用到所有圖片
-const applyLabelsToAll = () => {
+// [修改] 將當前圖片的標註套用到所有圖片 (修正：清除舊 OCR 結果並重新辨識)
+const applyLabelsToAll = async () => {
   // 1. 基本檢查
   if (!currentImage.value?.labels || currentImage.value.labels.length === 0) return
 
-  // 2. 跳出確認視窗，避免誤按導致其他圖片辛苦標好的資料被覆蓋
-  const confirmMsg = `確定要將目前的 ${currentImage.value.labels.length} 個標註框與答案套用到所有 ${images.value.length} 張圖片嗎？\n\n注意：這將會覆蓋其他圖片現有的標註！`
+  const confirmMsg = `確定要將目前的 ${currentImage.value.labels.length} 個標註框與答案套用到所有 ${images.value.length} 張圖片嗎？\n\n注意：這將會覆蓋其他圖片現有的標註，並在背景重新執行 OCR 辨識！`
   if (!confirm(confirmMsg)) return
 
-  // 3. 取得當前的標註來源 (深拷貝一份，作為樣板)
-  // 使用 map + spread operator 確保每個物件都是獨立的，不會因為修改某張圖而影響到別張
-  const sourceLabels = currentImage.value.labels.map(label => ({ ...label }))
+  // 2. 準備「乾淨」的樣板
+  const sourceLabels = currentImage.value.labels.map(label => ({
+    ...label,
+    recognizedAnswer: undefined, // 清除辨識結果
+    ocrCandidates: undefined,    // 清除候選字
+    isCorrect: undefined         // 清除對錯狀態
+  }))
 
-  // 4. 迴圈套用到每一張圖片
-  images.value.forEach((img, index) => {
-    // 跳過當前這張，避免自己覆蓋自己 (雖然覆蓋也沒差，但邏輯上跳過比較乾淨)
-    if (index === currentImageIndex.value) return
+  // 3. 迴圈套用
+  for (let i = 0; i < images.value.length; i++) {
+    // 跳過當前這張
+    if (i === currentImageIndex.value) continue;
 
-    // 複製一份新的標註陣列給該圖片
-    img.labels = sourceLabels.map(label => ({ ...label }))
+    const targetImg = images.value[i];
+
+    // [修正] 這裡加一行檢查，紅字就會消失！
+    if (!targetImg) continue;
+
+    // 複製標註
+    targetImg.labels = sourceLabels.map(label => ({ ...label }));
     
-    // 標記狀態為已載入，避免如果後續有自動偵測邏輯會再次觸發
-    img.predictionsLoaded = true
-    img.predictionError = undefined
-  })
+    // 設定狀態
+    targetImg.predictionsLoaded = true;
+    targetImg.predictionError = undefined;
 
-  alert('已成功套用至所有圖片！')
+    // [關鍵] 針對這張圖片，啟動 OCR 辨識！
+    runOCRForImage(targetImg);
+  }
+
+  alert('已成功套用！系統正在背景辨識其他圖片的內容。')
 }
 
 const nextImage = () => {
@@ -798,71 +900,17 @@ const exportLabels = () => {
   URL.revokeObjectURL(url)
 }
 
-const goToResults = async () => {
-  if (!currentImage.value || isProcessingOCR.value) return;
-  
-  const img = currentImage.value;
-  const labels = img.labels || [];
-  
-  const base64Data = extractBase64FromPreview(img.preview);
-  const previewImg = await loadPreviewImage(img.preview);
-  const { scale, offsetX, offsetY } = computeFit(previewImg.width, previewImg.height);
+const goToResults = () => {
+  if (!currentImage.value) return;
 
-  const inputPayload = {
-    image: base64Data,
-    annotations: labels.map(l => ({
-      class: l.class,
-      bbox: [
-        (l.x - offsetX) / scale,
-        (l.y - offsetY) / scale,
-        ((l.x - offsetX) / scale) + (l.width / scale),
-        ((l.y - offsetY) / scale) + (l.height / scale)
-      ]
-    }))
-  };
+  // 1. 深拷貝整理資料
+  const cleanImages = JSON.parse(JSON.stringify(images.value));
 
-  const inputBlob = new Blob([JSON.stringify(inputPayload, null, 2)], { type: 'application/json' });
-  const inputLink = document.createElement('a');
-  inputLink.href = URL.createObjectURL(inputBlob);
-  inputLink.download = `input.json`;
-  inputLink.click();
-  URL.revokeObjectURL(inputLink.href);
+  // 2. 存入 Store (這裡就不會報錯了，因為上面有 import)
+  setResultsData(cleanImages);
 
-  isProcessingOCR.value = true;
-  
-  try {
-    const response = await fetch('/api/ocr_process', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(inputPayload)
-    });
-
-    if (!response.ok) throw new Error(`API 錯誤: ${response.status}`);
-    
-    const resultData = await response.json(); 
-
-    const outputBlob = new Blob([JSON.stringify(resultData, null, 2)], { type: 'application/json' });
-    const outputLink = document.createElement('a');
-    outputLink.href = URL.createObjectURL(outputBlob);
-    outputLink.download = `output.json`;
-    outputLink.click();
-    URL.revokeObjectURL(outputLink.href);
-
-    router.push({ 
-      name: 'results', 
-      state: { 
-        ocrResults: resultData,
-        imageName: currentImage.value?.name,
-        allImages: images.value
-      } 
-    });
-
-  } catch (error: any) {
-    console.error('OCR 失敗:', error);
-    alert('辨識失敗，請檢查網路面板或後端 Log');
-  } finally {
-    isProcessingOCR.value = false;
-  }
+  // 3. 換頁
+  router.push({ name: 'results' });
 };
 </script>
 
