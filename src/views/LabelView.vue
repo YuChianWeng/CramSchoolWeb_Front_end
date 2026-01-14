@@ -32,9 +32,7 @@
               ref="canvas"
               tabindex="0"
               :style="{ 
-                cursor: currentMode === 'pan' 
-                  ? (isPanning ? 'grabbing' : 'grab') 
-                  : 'crosshair',
+                cursor: getCursorStyle(),
                 outline: 'none' /* 移除聚焦時的預設黑框 */
               }"
               @mousedown="startDrawing"
@@ -90,6 +88,14 @@
               <span class="single-class-label">{{ DEFAULT_CLASS }}</span>
               <button @click="retryPrediction" :disabled="currentImage?.isPredicting" class="retry-btn">
                 重新偵測
+              </button>
+              
+              <button 
+                @click="applyLabelsToAll" 
+                :disabled="!currentImage?.labels || currentImage.labels.length === 0" 
+                class="apply-all-btn"
+              >
+                全部套用
               </button>
             </div>
 
@@ -185,6 +191,9 @@ interface ImageData {
   predictionError?: string
 }
 
+const draggingLabelIndex = ref<number>(-1) // 記錄正在拖曳的標籤索引
+const dragOffset = ref({ x: 0, y: 0 })     // 記錄點擊點與框框左上角的距離
+const hoverLabelIndex = ref<number>(-1)    // 記錄滑鼠目前懸停在哪個框上 (用來變更游標)
 const router = useRouter()
 const canvas = ref<HTMLCanvasElement | null>(null)
 const images = ref<ImageData[]>([])
@@ -207,13 +216,13 @@ const inputRefs = ref<HTMLInputElement[]>([])
 
 const currentImage = computed(() => images.value[currentImageIndex.value])
 
-// [新增] 確保在列表更新前清空 refs，避免索引錯亂
+// 確保在列表更新前清空 refs
 onBeforeUpdate(() => {
   inputRefs.value = []
 })
 
 onMounted(() => {
-  // [新增] 註冊全域鍵盤監聽
+  // 註冊全域鍵盤監聽 (處理非輸入框時的刪除)
   window.addEventListener('keydown', handleGlobalKeydown)
 
   const state = history.state as { files?: ImageData[] };
@@ -238,7 +247,6 @@ onMounted(() => {
   }
 });
 
-// [新增] 移除監聽
 onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalKeydown)
 })
@@ -246,6 +254,22 @@ onUnmounted(() => {
 watch(currentImageIndex, () => {
   handleImageChange()
 })
+
+const getCursorStyle = () => {
+  if (currentMode.value === 'pan') {
+    return isPanning.value ? 'grabbing' : 'grab'
+  }
+  // 如果正在拖曳框框，顯示 'move'
+  if (draggingLabelIndex.value !== -1) {
+    return 'grabbing'
+  }
+  // 如果滑鼠指著某個框框，顯示 'move' (提示可拖曳)
+  if (hoverLabelIndex.value !== -1) {
+    return 'grab'
+  }
+  // 預設畫圖模式
+  return 'crosshair'
+}
 
 const handleImageChange = () => {
   selectedLabelIndex.value = -1 
@@ -261,24 +285,19 @@ const handleImageChange = () => {
   fetchPredictionsForCurrentImage()
 }
 
-// [新增] 全域鍵盤事件：處理非輸入框焦點時的刪除
+// 全域鍵盤事件：處理非輸入框焦點時的刪除
 const handleGlobalKeydown = (event: KeyboardEvent) => {
-  // 如果沒有選取任何標籤，不動作
   if (selectedLabelIndex.value === -1) return
 
-  // 檢查是否為刪除鍵
   if (event.key === 'Backspace' || event.key === 'Delete') {
     const activeEl = document.activeElement as HTMLElement
     
-    // 如果焦點正在某個輸入框內 (包含 Textarea 或 contentEditable)，則不執行全域刪除
-    // 這樣可以避免使用者正在打字(或修改答案)時誤刪整個框框
-    // 注意：如果是我們自己的 Label Input，它有綁定 @keydown="handleInputKeydown"，會由那裡處理「空字串才刪除」的邏輯
+    // 如果焦點正在輸入框內，不執行這裡的邏輯 (交給 handleInputKeydown)
     if (activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement || activeEl?.isContentEditable) {
       return
     }
 
-    // 如果焦點不在輸入框 (例如在 Body, Canvas, Button)，則直接刪除
-    event.preventDefault() // 防止瀏覽器上一頁等預設行為
+    event.preventDefault()
     removeLabel(selectedLabelIndex.value)
   }
 }
@@ -361,10 +380,23 @@ const selectLabel = (index: number) => {
   }
 }
 
-// 處理輸入框內的刪除：只有當答案為空時才刪除框框 (避免打字時誤刪)
+// [修改] 處理輸入框按鍵事件：Enter 跳轉 & Backspace 刪除
 const handleInputKeydown = (index: number, event: KeyboardEvent) => {
   const label = currentImage.value?.labels?.[index]
   if (!label) return
+
+  // 1. Enter 鍵 -> 跳到下一個輸入框
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    // 檢查是否有下一個標籤
+    const nextIndex = index + 1
+    if (currentImage.value?.labels && nextIndex < currentImage.value.labels.length) {
+      focusLabelInput(nextIndex)
+    }
+    return
+  }
+
+  // 2. Backspace/Delete 鍵 -> 如果是空的則刪除框框
   if ((event.key === 'Backspace' || event.key === 'Delete') && label.answer === '') {
     event.preventDefault()
     removeLabel(index)
@@ -374,32 +406,54 @@ const handleInputKeydown = (index: number, event: KeyboardEvent) => {
 const startDrawing = (event: MouseEvent) => {
   if (!canvas.value) return
 
+  // 1. 如果是平移模式或按住 Alt，保持原樣
   if (currentMode.value === 'pan' || event.button !== 0 || event.altKey) {
     startPan(event)
     return
   }
 
   const { x, y } = getCanvasCoords(event)
-  const labels = currentImage.value?.labels || []
-  let hitIndex = -1
   
+  // [修正] 確保 labels 是一個陣列，如果是 undefined 則給空陣列
+  const labels = currentImage.value?.labels || []
+  
+  // 2. 檢查是否點擊在現有的框框上
+  let hitIndex = -1
   for (let i = labels.length - 1; i >= 0; i--) {
     const l = labels[i]
+    
+    // [修正] 紅字解決重點：如果 l 是 undefined，直接跳過這一次迴圈
     if (!l) continue; 
+
     if (x >= l.x && x <= l.x + l.width && y >= l.y && y <= l.y + l.height) {
       hitIndex = i
       break
     }
   }
 
+  // 3. 如果點到了框框 -> 進入「拖曳模式」
   if (hitIndex !== -1) {
-    focusLabelInput(hitIndex)
-    return 
-  } else {
-    if (selectedLabelIndex.value !== -1) {
-      selectedLabelIndex.value = -1
-      loadImage()
+    draggingLabelIndex.value = hitIndex
+    selectedLabelIndex.value = hitIndex
+    
+    // [修正] 紅字解決重點：先取出該 label 並檢查是否存在
+    const targetLabel = labels[hitIndex]
+    if (targetLabel) {
+      dragOffset.value = {
+        x: x - targetLabel.x,
+        y: y - targetLabel.y
+      }
     }
+    
+    focusLabelInput(hitIndex)
+    loadImage()
+    return 
+  }
+
+  // 4. 沒點到框框 -> 清除選取並開始「畫新框」
+  if (selectedLabelIndex.value !== -1) {
+    selectedLabelIndex.value = -1
+    loadImage()
   }
 
   startX.value = x
@@ -408,14 +462,47 @@ const startDrawing = (event: MouseEvent) => {
 }
 
 const draw = (event: MouseEvent) => {
+  const { x, y } = getCanvasCoords(event)
+
   if (isPanning.value) {
     handlePanMove(event)
     return
   }
 
+  // [修正] 拖曳框框的邏輯
+  if (draggingLabelIndex.value !== -1 && currentImage.value?.labels) {
+    const label = currentImage.value.labels[draggingLabelIndex.value]
+    // [修正] 確保 label 存在才執行
+    if (label) {
+      label.x = x - dragOffset.value.x
+      label.y = y - dragOffset.value.y
+      loadImage()
+    }
+    return
+  }
+
+  // [修正] 滑鼠懸停 (Hover) 效果的邏輯
+  if (!isDrawing.value && draggingLabelIndex.value === -1) {
+    const labels = currentImage.value?.labels || []
+    let found = -1
+    for (let i = labels.length - 1; i >= 0; i--) {
+      const l = labels[i]
+      // [修正] 加入 undefined 檢查
+      if (!l) continue
+
+      if (x >= l.x && x <= l.x + l.width && y >= l.y && y <= l.y + l.height) {
+        found = i
+        break
+      }
+    }
+    if (hoverLabelIndex.value !== found) {
+      hoverLabelIndex.value = found
+    }
+  }
+
+  // 畫新框邏輯 (保持原樣)
   if (!isDrawing.value || !canvas.value) return
 
-  const { x, y } = getCanvasCoords(event)
   currentX.value = x
   currentY.value = y
 
@@ -517,11 +604,19 @@ const retryPrediction = () => {
 }
 
 const endDrawing = () => {
+  // 1. 結束平移
   if (isPanning.value) {
     stopPan()
     return
   }
 
+  // 2. [新增] 結束框框拖曳
+  if (draggingLabelIndex.value !== -1) {
+    draggingLabelIndex.value = -1 // 重置拖曳狀態
+    return
+  }
+
+  // 3. 結束畫新框 (原本的邏輯)
   if (!isDrawing.value || !currentImage.value) return
 
   isDrawing.value = false
@@ -530,6 +625,7 @@ const endDrawing = () => {
   const height = currentY.value - startY.value
 
   if (Math.abs(width) > 10 && Math.abs(height) > 10) {
+    // ... (維持原本的新增 Label 邏輯) ...
     const label: Label = {
       class: currentClass.value,
       x: Math.min(startX.value, currentX.value),
@@ -545,10 +641,10 @@ const endDrawing = () => {
     currentImage.value.labels.push(label)
 
     focusLabelInput(currentImage.value.labels.length - 1)
+    selectedLabelIndex.value = currentImage.value.labels.length - 1 // 新增完自動選中
     loadImage()
   }
 }
-
 const removeLabel = (index: number) => {
   const img = currentImage.value
   if (img && img.labels) {
@@ -639,6 +735,35 @@ const previousImage = () => {
   if (currentImageIndex.value > 0) {
     currentImageIndex.value--
   }
+}
+
+// [新增] 將當前圖片的標註套用到所有圖片
+const applyLabelsToAll = () => {
+  // 1. 基本檢查
+  if (!currentImage.value?.labels || currentImage.value.labels.length === 0) return
+
+  // 2. 跳出確認視窗，避免誤按導致其他圖片辛苦標好的資料被覆蓋
+  const confirmMsg = `確定要將目前的 ${currentImage.value.labels.length} 個標註框與答案套用到所有 ${images.value.length} 張圖片嗎？\n\n注意：這將會覆蓋其他圖片現有的標註！`
+  if (!confirm(confirmMsg)) return
+
+  // 3. 取得當前的標註來源 (深拷貝一份，作為樣板)
+  // 使用 map + spread operator 確保每個物件都是獨立的，不會因為修改某張圖而影響到別張
+  const sourceLabels = currentImage.value.labels.map(label => ({ ...label }))
+
+  // 4. 迴圈套用到每一張圖片
+  images.value.forEach((img, index) => {
+    // 跳過當前這張，避免自己覆蓋自己 (雖然覆蓋也沒差，但邏輯上跳過比較乾淨)
+    if (index === currentImageIndex.value) return
+
+    // 複製一份新的標註陣列給該圖片
+    img.labels = sourceLabels.map(label => ({ ...label }))
+    
+    // 標記狀態為已載入，避免如果後續有自動偵測邏輯會再次觸發
+    img.predictionsLoaded = true
+    img.predictionError = undefined
+  })
+
+  alert('已成功套用至所有圖片！')
 }
 
 const nextImage = () => {
@@ -958,6 +1083,31 @@ canvas {
 
 .state.idle {
   color: #666;
+}
+
+.apply-all-btn {
+  background-color: #673ab7; /* 紫色，代表批次處理 */
+  color: #fff;
+  border: none;
+  padding: 0.4rem 0.8rem; /* 稍微大一點點 */
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  margin-left: 10px; /* 與左邊按鈕拉開距離 */
+  transition: background-color 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.apply-all-btn:hover {
+  background-color: #5e35b1;
+}
+
+.apply-all-btn:disabled {
+  background-color: #b39ddb;
+  cursor: not-allowed;
+  opacity: 0.7;
 }
 
 .retry-btn {
