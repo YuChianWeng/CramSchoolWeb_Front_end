@@ -2,7 +2,7 @@
   <div class="label-container">
     <h1>Image Labeling for YOLO</h1>
     
-    <div v-if="images.length === 0" class="no-images">
+    <div v-if="!hasAnyImages" class="no-images">
       <p>No images uploaded. Please upload images first.</p>
       <button @click="goToUpload" class="upload-link-btn">Go to Upload</button>
     </div>
@@ -10,9 +10,23 @@
     <div v-else class="labeling-workspace">
       <div class="sidebar">
         <h2>Image List</h2>
+        <div class="view-toggle">
+          <button
+            :class="{ active: viewMode === 'student' }"
+            @click="viewMode = 'student'"
+          >
+            學生卷檢視
+          </button>
+          <button
+            :class="{ active: viewMode === 'master' }"
+            @click="viewMode = 'master'"
+          >
+            標準卷檢視
+          </button>
+        </div>
         <div class="image-list">
-          <div 
-            v-for="(img, index) in images" 
+          <div
+            v-for="(img, index) in displayedImages"
             :key="index"
             class="image-list-item"
             :class="{ active: currentImageIndex === index }"
@@ -86,16 +100,20 @@
             <div class="class-selector single-class">
               <label>標註類型：</label>
               <span class="single-class-label">{{ DEFAULT_CLASS }}</span>
-              <button @click="retryPrediction" :disabled="currentImage?.isPredicting" class="retry-btn">
-                重新偵測
-              </button>
+                <button
+                  @click="retryPrediction"
+                  :disabled="currentImage?.isPredicting || isMasterView"
+                  class="retry-btn"
+                >
+                  重新偵測
+                </button>
               
               <button 
                 @click="applyLabelsToAll" 
-                :disabled="!currentImage?.labels || currentImage.labels.length === 0" 
+                :disabled="isMasterView || !currentImage?.labels || currentImage.labels.length === 0 || isProcessingOCR" 
                 class="apply-all-btn"
               >
-                全部套用
+                {{ isProcessingOCR ? '套用中...' : '全部套用' }}
               </button>
             </div>
 
@@ -116,11 +134,11 @@
                       {{ label.class }} ({{ index + 1 }})
                     </span>
 
-                    <div class="label-input-group">
+                    <div v-if="!isMasterView" class="label-input-group">
                       <span class="input-prefix">答:</span>
-                      <input 
-                        type="text" 
-                        v-model="label.answer" 
+                      <input
+                        type="text"
+                        v-model="label.answer"
                         maxlength="4"
                         :ref="(el) => { if(el) inputRefs[index] = el as HTMLInputElement }"
                         @focus="selectLabel(index)"
@@ -128,6 +146,10 @@
                         @click.stop
                         @input="updateRecognizedAnswer(label)"
                       />
+                    </div>
+                    <div v-else class="label-expected">
+                      <span class="input-prefix">正解:</span>
+                      <span class="expected-value">{{ label.expectedAnswer || '—' }}</span>
                     </div>
                   </div>
                 </div>
@@ -144,11 +166,11 @@
                 ← Previous
               </button>
               <span class="image-counter">
-                {{ currentImageIndex + 1 }} / {{ images.length }}
+                {{ currentImageIndex + 1 }} / {{ displayedImages.length }}
               </span>
               <button
                 @click="nextImage"
-                :disabled="currentImageIndex === images.length - 1"
+                :disabled="currentImageIndex === displayedImages.length - 1"
                 class="nav-btn"
               >
                 Next →
@@ -199,6 +221,7 @@ interface ImageData {
   predictionsLoaded?: boolean
   isPredicting?: boolean
   predictionError?: string
+  role: 'student' | 'master'
 }
 
 const draggingLabelIndex = ref<number>(-1) // 記錄正在拖曳的標籤索引
@@ -206,7 +229,9 @@ const dragOffset = ref({ x: 0, y: 0 })     // 記錄點擊點與框框左上角�
 const hoverLabelIndex = ref<number>(-1)    // 記錄滑鼠目前懸停在哪個框上 (用來變更游標)
 const router = useRouter()
 const canvas = ref<HTMLCanvasElement | null>(null)
-const images = ref<ImageData[]>([])
+const studentImages = ref<ImageData[]>([])
+const masterKeyImage = ref<ImageData | null>(null)
+const viewMode = ref<'student' | 'master'>('student')
 const currentImageIndex = ref(0)
 const currentClass = ref(DEFAULT_CLASS)
 const isDrawing = ref(false)
@@ -224,7 +249,16 @@ const zoom = ref(1)
 const selectedLabelIndex = ref<number>(-1)
 const inputRefs = ref<HTMLInputElement[]>([])
 
-const currentImage = computed(() => images.value[currentImageIndex.value])
+const displayedImages = computed(() =>
+  viewMode.value === 'student'
+    ? studentImages.value
+    : masterKeyImage.value
+      ? [masterKeyImage.value]
+      : []
+)
+const currentImage = computed(() => displayedImages.value[currentImageIndex.value])
+const isMasterView = computed(() => viewMode.value === 'master')
+const hasAnyImages = computed(() => studentImages.value.length > 0 || !!masterKeyImage.value)
 
 // 確保在列表更新前清空 refs
 onBeforeUpdate(() => {
@@ -235,26 +269,39 @@ onMounted(() => {
   // 註冊全域鍵盤監聽 (處理非輸入框時的刪除)
   window.addEventListener('keydown', handleGlobalKeydown)
 
-  const state = history.state as { files?: ImageData[] };
+  const state = history.state as { files?: ImageData[]; masterKey?: ImageData }
   if (state?.files && state.files.length > 0) {
-    images.value = state.files.map(f => ({
+    studentImages.value = state.files.map(f => ({
       ...f,
-      labels: f.labels || [], 
+      labels: f.labels || [],
       preview: f.preview,
       predictionsLoaded: f.predictionsLoaded || false,
       isPredicting: false,
-      predictionError: undefined
-    }));
-    currentImageIndex.value = 0;
-    nextTick(() => {
-      handleImageChange();
-    });
-  } else {
-    images.value = [
-      { name: 'sample1.jpg', preview: '', labels: [], predictionsLoaded: false },
-      { name: 'sample2.jpg', preview: '', labels: [], predictionsLoaded: false }
-    ];
+      predictionError: undefined,
+      role: 'student'
+    }))
   }
+  if (state?.masterKey) {
+    masterKeyImage.value = {
+      ...state.masterKey,
+      labels: state.masterKey.labels || [],
+      preview: state.masterKey.preview,
+      predictionsLoaded: state.masterKey.predictionsLoaded || false,
+      isPredicting: false,
+      predictionError: undefined,
+      role: 'master'
+    }
+  }
+  if (studentImages.value.length === 0) {
+    studentImages.value = [
+      { name: 'sample1.jpg', preview: '', labels: [], predictionsLoaded: false, role: 'student' },
+      { name: 'sample2.jpg', preview: '', labels: [], predictionsLoaded: false, role: 'student' }
+    ]
+  }
+  currentImageIndex.value = 0
+  nextTick(() => {
+    handleImageChange()
+  })
 });
 
 onUnmounted(() => {
@@ -263,6 +310,13 @@ onUnmounted(() => {
 
 watch(currentImageIndex, () => {
   handleImageChange()
+})
+
+watch(viewMode, () => {
+  currentImageIndex.value = 0
+  nextTick(() => {
+    handleImageChange()
+  })
 })
 
 const getCursorStyle = () => {
@@ -282,7 +336,55 @@ const getCursorStyle = () => {
 }
 
 // [修改] 改名為 runOCRForImage，並接受參數，讓它可以處理任何一張圖
-const runOCRForImage = async (img: ImageData) => {
+const extractTextValue = (value: any, seen = new Set<any>()): string => {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value).trim()
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0 ? extractTextValue(value[0], seen) : ''
+  }
+  if (typeof value === 'object') {
+    if (seen.has(value)) return ''
+    seen.add(value)
+    const candidate =
+      value.text ??
+      value.words ??
+      value.word ??
+      value.label ??
+      value.content ??
+      value.result ??
+      value.prediction ??
+      value.ocr ??
+      value.value ??
+      value.answer ??
+      value.recognizedAnswer ??
+      value.data?.text ??
+      value.data?.words ??
+      value.data?.word ??
+      value.data?.label ??
+      value.data?.result ??
+      value.data?.prediction ??
+      value.data?.ocr
+    if (candidate !== undefined && candidate !== null) {
+      return candidate === value ? '' : extractTextValue(candidate, seen)
+    }
+    for (const key of Object.keys(value)) {
+      const found = extractTextValue((value as Record<string, any>)[key], seen)
+      if (found) return found
+    }
+  }
+  return ''
+}
+
+const chooseOcrValue = (res: { chinese?: string; digit?: string } | string) => {
+  if (typeof res === 'string') return res.trim()
+  const digit = String(res.digit || '').trim()
+  const chinese = String(res.chinese || '').trim()
+  return digit || chinese
+}
+
+const runOCRForImage = async (img: ImageData, target: 'student' | 'master') => {
   // 檢查傳入的圖片是否有效
   if (!img || !img.preview || !img.labels || img.labels.length === 0) return;
 
@@ -306,7 +408,8 @@ const runOCRForImage = async (img: ImageData) => {
     };
 
     // 2. 呼叫後端
-    const response = await fetch('/api/ocr_process', {
+    const endpoint = target === 'master' ? '/ocr_google' : '/api/ocr_process'
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(inputPayload)
@@ -323,15 +426,27 @@ const runOCRForImage = async (img: ImageData) => {
         // 確保對應的 label 還存在
         if (img.labels && img.labels[index]) {
           const targetLabel = img.labels[index];
-          
-          // 填入候選字
-          targetLabel.ocrCandidates = {
-            chinese: String(res.chinese || ''),
-            digit: String(res.digit || '')
-          };
+          if (target === 'master') {
+            targetLabel.expectedAnswer = extractTextValue(res)
+            targetLabel.ocrCandidates = undefined
+            targetLabel.recognizedAnswer = undefined
+          } else {
+            const candidate =
+              res && (res.chinese !== undefined || res.digit !== undefined)
+                ? {
+                    chinese: String(res.chinese || ''),
+                    digit: String(res.digit || '')
+                  }
+                : undefined
 
-          // [重要] 因為是背景跑，我們直接幫它執行判斷邏輯
-          updateRecognizedAnswer(targetLabel);
+            if (candidate) {
+              targetLabel.ocrCandidates = candidate
+              updateRecognizedAnswer(targetLabel)
+            } else {
+              targetLabel.ocrCandidates = undefined
+              targetLabel.recognizedAnswer = extractTextValue(res)
+            }
+          }
         }
       });
       console.log(`圖片 ${img.name} 背景 OCR 完成`);
@@ -353,7 +468,9 @@ const handleImageChange = () => {
     if (!currentImage.value.labels) currentImage.value.labels = []
   }
   loadImage()
-  fetchPredictionsForCurrentImage()
+  if (currentImage.value?.role === 'student') {
+    fetchPredictionsForCurrentImage()
+  }
 }
 
 // 全域鍵盤事件：處理非輸入框焦點時的刪除
@@ -620,7 +737,7 @@ const extractBase64FromPreview = (preview: string) => {
 
 const fetchPredictionsForCurrentImage = async () => {
   const img = currentImage.value
-  if (!img || !img.preview || img.isPredicting || img.predictionsLoaded) return
+  if (!img || img.role !== 'student' || !img.preview || img.isPredicting || img.predictionsLoaded) return
 
   img.isPredicting = true
   img.predictionError = undefined
@@ -673,7 +790,7 @@ const fetchPredictionsForCurrentImage = async () => {
     img.labels = mappedLabels
     img.predictionsLoaded = true
     loadImage() // [新增這一行] 框框出來後，馬上叫後端去辨識裡面的字
-    await runOCRForImage(img); // 背景跑 OCR
+    await runOCRForImage(img, 'student'); // 背景跑 OCR
   } catch (error: any) {
     console.error('Error fetching predictions:', error)
     img.predictionError = error?.message || 'Unable to fetch predictions'
@@ -684,7 +801,7 @@ const fetchPredictionsForCurrentImage = async () => {
 
 const retryPrediction = () => {
   const img = currentImage.value
-  if (!img || img.isPredicting) return
+  if (!img || img.role !== 'student' || img.isPredicting) return
 
   img.predictionsLoaded = false
   img.predictionError = undefined
@@ -733,7 +850,7 @@ const endDrawing = () => {
     focusLabelInput(currentImage.value.labels.length - 1)
     selectedLabelIndex.value = currentImage.value.labels.length - 1 // 新增完自動選中
     loadImage()
-    runOCRForImage(currentImage.value); // [新增這一行] 手畫完框，也馬上辨識這個新框框
+    runOCRForImage(currentImage.value, currentImage.value.role); // [新增這一行] 手畫完框，也馬上辨識這個新框框
   }
 }
 const removeLabel = (index: number) => {
@@ -832,44 +949,54 @@ const previousImage = () => {
 const applyLabelsToAll = async () => {
   // 1. 基本檢查
   if (!currentImage.value?.labels || currentImage.value.labels.length === 0) return
+  if (currentImage.value.role !== 'student') return
 
-  const confirmMsg = `確定要將目前的 ${currentImage.value.labels.length} 個標註框與答案套用到所有 ${images.value.length} 張圖片嗎？\n\n注意：這將會覆蓋其他圖片現有的標註，並在背景重新執行 OCR 辨識！`
+  const totalTargets = studentImages.value.length + (masterKeyImage.value ? 1 : 0)
+  const confirmMsg = `確定要將目前的 ${currentImage.value.labels.length} 個標註框與答案套用到所有 ${totalTargets} 張圖片嗎？\n\n注意：這將會覆蓋其他圖片現有的標註，並重新執行 OCR 辨識！`
   if (!confirm(confirmMsg)) return
 
-  // 2. 準備「乾淨」的樣板
-  const sourceLabels = currentImage.value.labels.map(label => ({
-    ...label,
-    recognizedAnswer: undefined, // 清除辨識結果
-    ocrCandidates: undefined,    // 清除候選字
-    isCorrect: undefined         // 清除對錯狀態
-  }))
+  isProcessingOCR.value = true
 
-  // 3. 迴圈套用
-  for (let i = 0; i < images.value.length; i++) {
-    // 跳過當前這張
-    if (i === currentImageIndex.value) continue;
+  try {
+    // 2. 準備「乾淨」的樣板
+    const sourceLabels = currentImage.value.labels.map(label => ({
+      ...label,
+      recognizedAnswer: undefined,
+      expectedAnswer: undefined,
+      ocrCandidates: undefined,
+      isCorrect: undefined
+    }))
 
-    const targetImg = images.value[i];
+    const targets: ImageData[] = []
+    if (masterKeyImage.value) {
+      masterKeyImage.value.labels = sourceLabels.map(label => ({
+        ...label,
+        answer: ''
+      }))
+      masterKeyImage.value.predictionsLoaded = true
+      masterKeyImage.value.predictionError = undefined
+      targets.push(masterKeyImage.value)
+    }
 
-    // [修正] 這裡加一行檢查，紅字就會消失！
-    if (!targetImg) continue;
+    studentImages.value.forEach(img => {
+      img.labels = sourceLabels.map(label => ({ ...label }))
+      img.predictionsLoaded = true
+      img.predictionError = undefined
+      targets.push(img)
+    })
 
-    // 複製標註
-    targetImg.labels = sourceLabels.map(label => ({ ...label }));
-    
-    // 設定狀態
-    targetImg.predictionsLoaded = true;
-    targetImg.predictionError = undefined;
+    for (const targetImg of targets) {
+      await runOCRForImage(targetImg, targetImg.role)
+    }
 
-    // [關鍵] 針對這張圖片，啟動 OCR 辨識！
-    runOCRForImage(targetImg);
+    alert('已成功套用！系統已完成 OCR 辨識。')
+  } finally {
+    isProcessingOCR.value = false
   }
-
-  alert('已成功套用！系統正在背景辨識其他圖片的內容。')
 }
 
 const nextImage = () => {
-  if (currentImageIndex.value < images.value.length - 1) {
+  if (currentImageIndex.value < displayedImages.value.length - 1) {
     currentImageIndex.value++
   }
 }
@@ -879,10 +1006,15 @@ const goToUpload = () => {
 }
 
 const exportLabels = () => {
-  const yoloData = images.value.map(img => {
+  const allImages = [
+    ...(masterKeyImage.value ? [masterKeyImage.value] : []),
+    ...studentImages.value
+  ]
+  const yoloData = allImages.map(img => {
     const labels = img.labels || []
     return {
       image: img.name,
+      role: img.role,
       annotations: labels.map(label => ({
         class: label.class,
         bbox: [label.x, label.y, label.width, label.height],
@@ -904,10 +1036,16 @@ const goToResults = () => {
   if (!currentImage.value) return;
 
   // 1. 深拷貝整理資料
-  const cleanImages = JSON.parse(JSON.stringify(images.value));
+  const cleanMasterKey = masterKeyImage.value
+    ? JSON.parse(JSON.stringify(masterKeyImage.value))
+    : null
+  const cleanStudents = JSON.parse(JSON.stringify(studentImages.value))
 
   // 2. 存入 Store (這裡就不會報錯了，因為上面有 import)
-  setResultsData(cleanImages);
+  setResultsData({
+    masterKey: cleanMasterKey,
+    students: cleanStudents
+  });
 
   // 3. 換頁
   router.push({ name: 'results' });
@@ -971,6 +1109,34 @@ h1 {
   font-size: 1.2rem;
   margin-bottom: 1rem;
   color: #2c3e50;
+}
+
+.view-toggle {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.view-toggle button {
+  flex: 1;
+  padding: 0.5rem;
+  border: 2px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+  font-weight: bold;
+  color: #2c3e50;
+  transition: all 0.2s;
+}
+
+.view-toggle button.active {
+  border-color: #42b883;
+  background-color: #e8f5e9;
+  color: #42b883;
+}
+
+.view-toggle button:hover:not(.active) {
+  background-color: #f9f9f9;
 }
 
 .image-list {
@@ -1307,6 +1473,24 @@ canvas {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.label-expected {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: bold;
+  color: #2c3e50;
+}
+
+.expected-value {
+  min-width: 70px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background-color: #fff7e6;
+  color: #8a5a00;
+  text-align: center;
+  font-size: 1.1rem;
 }
 
 .input-prefix {

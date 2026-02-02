@@ -2,39 +2,79 @@
   <div class="upload-container">
     <h1>Upload Images</h1>
     <div class="upload-area">
-      <div 
-        class="drop-zone" 
-        @dragover.prevent="handleDragOver"
-        @dragleave.prevent="handleDragLeave"
-        @drop.prevent="handleDrop"
-        :class="{ 'drag-over': isDragging }"
-      >
-        <div class="upload-icon">📁</div>
-        <p>Drag and drop images here or click to select</p>
-        <input
-          type="file"
-          ref="fileInput"
-          @change="handleFileSelect"
-          multiple
-          accept="image/*"
-          style="display: none"
-        />
-        <button @click="triggerFileInput" class="select-btn">Select Images</button>
+      <div class="upload-section">
+        <h2>標準答案卷（Master Key）</h2>
+        <div
+          class="drop-zone"
+          @dragover.prevent="handleDragOver('master')"
+          @dragleave.prevent="handleDragLeave('master')"
+          @drop.prevent="handleDrop('master', $event)"
+          :class="{ 'drag-over': isDraggingMaster }"
+        >
+          <div class="upload-icon">🗂️</div>
+          <p>拖曳或點擊上傳 1 張標準答案卷</p>
+          <input
+            type="file"
+            ref="masterInput"
+            @change="handleFileSelect('master', $event)"
+            accept="image/*"
+            style="display: none"
+          />
+          <button @click="triggerFileInput('master')" class="select-btn">選擇標準答案卷</button>
+        </div>
+        <div v-if="masterFile" class="file-list">
+          <div class="file-grid">
+            <div class="file-item">
+              <img :src="masterFile.preview" :alt="masterFile.name" class="preview-image" />
+              <p class="file-name">{{ masterFile.name }}</p>
+              <button @click="clearMaster" class="remove-btn">Remove</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="upload-section">
+        <h2>學生考卷</h2>
+        <div
+          class="drop-zone"
+          @dragover.prevent="handleDragOver('students')"
+          @dragleave.prevent="handleDragLeave('students')"
+          @drop.prevent="handleDrop('students', $event)"
+          :class="{ 'drag-over': isDraggingStudents }"
+        >
+          <div class="upload-icon">📁</div>
+          <p>拖曳或點擊上傳多張學生考卷</p>
+          <input
+            type="file"
+            ref="studentInput"
+            @change="handleFileSelect('students', $event)"
+            multiple
+            accept="image/*"
+            style="display: none"
+          />
+          <button @click="triggerFileInput('students')" class="select-btn">選擇學生考卷</button>
+        </div>
+        <div v-if="studentFiles.length > 0" class="file-list">
+          <h3>Selected Images ({{ studentFiles.length }})</h3>
+          <div class="file-grid">
+            <div v-for="(file, index) in studentFiles" :key="index" class="file-item">
+              <img :src="file.preview" :alt="file.name" class="preview-image" />
+              <p class="file-name">{{ file.name }}</p>
+              <button @click="removeStudent(index)" class="remove-btn">Remove</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
-    <div v-if="selectedFiles.length > 0" class="file-list">
-      <h2>Selected Images ({{ selectedFiles.length }})</h2>
-      <div class="file-grid">
-        <div v-for="(file, index) in selectedFiles" :key="index" class="file-item">
-          <img :src="file.preview" :alt="file.name" class="preview-image" />
-          <p class="file-name">{{ file.name }}</p>
-          <button @click="removeFile(index)" class="remove-btn">Remove</button>
-        </div>
-      </div>
+    <div v-if="masterFile || studentFiles.length > 0" class="file-list">
       <div class="action-buttons">
         <button @click="clearAll" class="clear-btn">Clear All</button>
-        <button @click="uploadFiles" class="upload-btn" :disabled="isUploading">
+        <button
+          @click="uploadFiles"
+          class="upload-btn"
+          :disabled="isUploading"
+        >
           {{ isUploading ? 'Uploading...' : 'Upload & Label' }}
         </button>
       </div>
@@ -53,78 +93,119 @@ interface FileWithPreview {
 }
 
 const router = useRouter()
-const fileInput = ref<HTMLInputElement | null>(null)
-const selectedFiles = ref<FileWithPreview[]>([])
-const isDragging = ref(false)
+const masterInput = ref<HTMLInputElement | null>(null)
+const studentInput = ref<HTMLInputElement | null>(null)
+const masterFile = ref<FileWithPreview | null>(null)
+const studentFiles = ref<FileWithPreview[]>([])
+const isDraggingMaster = ref(false)
+const isDraggingStudents = ref(false)
 const isUploading = ref(false)
 
-const triggerFileInput = () => {
-  fileInput.value?.click()
+const triggerFileInput = (target: 'master' | 'students') => {
+  if (target === 'master') {
+    masterInput.value?.click()
+  } else {
+    studentInput.value?.click()
+  }
 }
 
-const handleDragOver = () => {
-  isDragging.value = true
+const handleDragOver = (target: 'master' | 'students') => {
+  if (target === 'master') {
+    isDraggingMaster.value = true
+  } else {
+    isDraggingStudents.value = true
+  }
 }
 
-const handleDragLeave = () => {
-  isDragging.value = false
+const handleDragLeave = (target: 'master' | 'students') => {
+  if (target === 'master') {
+    isDraggingMaster.value = false
+  } else {
+    isDraggingStudents.value = false
+  }
 }
 
-const handleDrop = (event: DragEvent) => {
-  isDragging.value = false
+const handleDrop = (target: 'master' | 'students', event: DragEvent) => {
+  if (target === 'master') {
+    isDraggingMaster.value = false
+  } else {
+    isDraggingStudents.value = false
+  }
   const files = event.dataTransfer?.files
   if (files) {
-    addFiles(Array.from(files))
+    addFiles(target, Array.from(files))
   }
 }
 
-const handleFileSelect = (event: Event) => {
-  const target = event.target as HTMLInputElement
-  const files = target.files
+const handleFileSelect = (target: 'master' | 'students', event: Event) => {
+  const input = event.target as HTMLInputElement
+  const files = input.files
   if (files) {
-    addFiles(Array.from(files))
+    addFiles(target === 'master' ? 'master' : 'students', Array.from(files))
   }
 }
 
-const addFiles = (files: File[]) => {
+const addFiles = (target: 'master' | 'students', files: File[]) => {
   files.forEach(file => {
     if (file.type.startsWith('image/')) {
       const reader = new FileReader()
       reader.onload = (e) => {
-        selectedFiles.value.push({
+        const previewData = {
           file,
           name: file.name,
           preview: e.target?.result as string
-        })
+        }
+        if (target === 'master') {
+          masterFile.value = previewData
+        } else {
+          studentFiles.value.push(previewData)
+        }
       }
       reader.readAsDataURL(file)
     }
   })
 }
 
-const removeFile = (index: number) => {
-  selectedFiles.value.splice(index, 1)
+const clearMaster = () => {
+  masterFile.value = null
+}
+
+const removeStudent = (index: number) => {
+  studentFiles.value.splice(index, 1)
 }
 
 const clearAll = () => {
-  selectedFiles.value = []
+  masterFile.value = null
+  studentFiles.value = []
 }
 
 const uploadFiles = () => {
+  if (!masterFile.value) {
+    alert('請先上傳標準答案卷。')
+    return
+  }
+  if (studentFiles.value.length === 0) {
+    alert('請至少上傳一張學生考卷。')
+    return
+  }
   isUploading.value = true
   // TODO: Replace with actual upload logic in production
   // This is a simulated upload for demonstration purposes
   setTimeout(() => {
     isUploading.value = false
-    // Navigate to label page with uploaded files (without File objects, just metadata)
-    const filesData = selectedFiles.value.map(f => ({
+    const masterData = {
+      name: masterFile.value!.name,
+      preview: masterFile.value!.preview,
+      labels: []
+    }
+    const filesData = studentFiles.value.map(f => ({
       name: f.name,
       preview: f.preview,
       labels: []
     }))
     router.push({ 
       name: 'label',
-      state: { files: filesData }
+      state: { masterKey: masterData, files: filesData }
     })
   }, 1000)
 }
@@ -144,7 +225,26 @@ h1 {
 }
 
 .upload-area {
+  display: grid;
+  gap: 2rem;
   margin-bottom: 2rem;
+}
+
+.upload-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.upload-section h2 {
+  margin: 0;
+  color: #2c3e50;
+}
+
+.upload-section h3 {
+  margin: 0 0 0.75rem;
+  color: #2c3e50;
+  font-size: 1rem;
 }
 
 .drop-zone {
