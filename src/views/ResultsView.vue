@@ -21,6 +21,10 @@
     </div>
 
     <div v-else class="results-body">
+      <div v-if="showMasterWarning" class="warning-banner">
+        <strong>提醒：</strong>
+        尚未取得標準答案卷的 OCR 結果，請回到標記頁同步標準卷的框位與 OCR，再重新查看結果。
+      </div>
       <section class="image-section">
         <div class="section-header">
           <div>
@@ -152,6 +156,11 @@ interface IncomingImage {
   totalLabels?: number
 }
 
+interface ResultsPayload {
+  masterKey?: IncomingImage | null
+  students?: IncomingImage[]
+}
+
 interface NormalizedImage extends IncomingImage {
   preview: string
   labels: LabelResult[]
@@ -164,6 +173,7 @@ interface NormalizedImage extends IncomingImage {
 
 const router = useRouter()
 const scoredImages = ref<NormalizedImage[]>([])
+const masterKeyImage = ref<IncomingImage | null>(null)
 const selectedIndex = ref<number | null>(null)
 const placeholderImage =
   'data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"200\" viewBox=\"0 0 320 200\" fill=\"none\"><rect width=\"320\" height=\"200\" rx=\"12\" fill=\"%23e8f5e9\"/><text x=\"50%\" y=\"50%\" dominant-baseline=\"middle\" text-anchor=\"middle\" font-family=\"Arial\" font-size=\"16\" fill=\"%23666\">預覽圖片</text></svg>'
@@ -253,12 +263,16 @@ const mergeOcrResultsWithImages = (
   })
 }
 
-const normalizeImage = (img: IncomingImage): NormalizedImage => {
-  const labels = (img.labels ?? []).map((label) => {
+const normalizeImage = (
+  img: IncomingImage,
+  expectedAnswers: string[] = []
+): NormalizedImage => {
+  const labels = (img.labels ?? []).map((label, index) => {
     const normalizedRecognized = normalizeAnswer(label.recognizedAnswer)
     const normalizedAnswer = normalizeAnswer(label.answer)
+    const expectedFromMaster = expectedAnswers[index] || ''
     const expectedAnswer =
-      normalizedAnswer || normalizeAnswer(label.expectedAnswer)
+      expectedFromMaster || normalizeAnswer(label.expectedAnswer) || normalizedAnswer
     let isCorrect = label.isCorrect
     if (typeof isCorrect !== 'boolean' && expectedAnswer && normalizedRecognized) {
       isCorrect = normalizedRecognized === normalizeAnswer(expectedAnswer)
@@ -295,22 +309,47 @@ const normalizeImage = (img: IncomingImage): NormalizedImage => {
 
 const STORAGE_KEY = 'results-page-data'
 
+const extractPayload = (payload: any): ResultsPayload => {
+  if (Array.isArray(payload)) {
+    return { students: payload }
+  }
+  if (payload && (payload.students || payload.masterKey)) {
+    return {
+      students: payload.students ?? [],
+      masterKey: payload.masterKey ?? null
+    }
+  }
+  return { students: [] }
+}
+
+const getExpectedAnswers = (master: IncomingImage | null): string[] =>
+  (master?.labels ?? []).map((label) =>
+    normalizeAnswer(label.expectedAnswer ?? label.answer)
+  )
+
 const loadResultsFromState = () => {
   const cachedInMemory = getResultsData()
-  if (cachedInMemory && cachedInMemory.length > 0) {
-    scoredImages.value = cachedInMemory.map(normalizeImage)
-    return
+  if (cachedInMemory) {
+    const { masterKey, students } = extractPayload(cachedInMemory)
+    if ((students && students.length > 0) || masterKey) {
+      masterKeyImage.value = masterKey ?? null
+      const expectedAnswers = getExpectedAnswers(masterKeyImage.value)
+      scoredImages.value = (students ?? []).map((img) =>
+        normalizeImage(img, [...expectedAnswers])
+      )
+      return
+    }
   }
   const state = history.state as {
-    results?: IncomingImage[]
-    images?: IncomingImage[]
-    allImages?: IncomingImage[]
+    results?: IncomingImage[] | ResultsPayload
+    images?: IncomingImage[] | ResultsPayload
+    allImages?: IncomingImage[] | ResultsPayload
     ocrResults?: any
     imageName?: string
     state?: {
-      results?: IncomingImage[]
-      images?: IncomingImage[]
-      allImages?: IncomingImage[]
+      results?: IncomingImage[] | ResultsPayload
+      images?: IncomingImage[] | ResultsPayload
+      allImages?: IncomingImage[] | ResultsPayload
       ocrResults?: any
       imageName?: string
     }
@@ -318,30 +357,53 @@ const loadResultsFromState = () => {
 
   const nestedState = state?.state
   const ocrPayload = state?.ocrResults || nestedState?.ocrResults
-  const ocrImages = state?.allImages || state?.images || nestedState?.allImages || nestedState?.images
+  const ocrImages =
+    state?.allImages || state?.images || nestedState?.allImages || nestedState?.images
   const ocrImageName = state?.imageName || nestedState?.imageName
 
-  if (ocrPayload && ocrImages && ocrImages.length > 0) {
-    const merged = mergeOcrResultsWithImages(ocrImages, ocrPayload, ocrImageName)
-    scoredImages.value = merged.map(normalizeImage)
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
-    return
+  if (ocrPayload && ocrImages) {
+    const { students, masterKey } = extractPayload(ocrImages)
+    if (students && students.length > 0) {
+      const merged = mergeOcrResultsWithImages(students, ocrPayload, ocrImageName)
+      masterKeyImage.value = masterKey ?? null
+      const expectedAnswers = getExpectedAnswers(masterKeyImage.value)
+      scoredImages.value = merged.map((img) => normalizeImage(img, [...expectedAnswers]))
+      sessionStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ students: merged, masterKey: masterKeyImage.value })
+      )
+      return
+    }
   }
 
-  const payload =
-    state?.results || state?.images || nestedState?.results || nestedState?.images
+  const payload = state?.results || state?.images || nestedState?.results || nestedState?.images
 
-  if (payload && payload.length > 0) {
-    scoredImages.value = payload.map(normalizeImage)
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
-    return
+  if (payload) {
+    const { masterKey, students } = extractPayload(payload)
+    if ((students && students.length > 0) || masterKey) {
+      masterKeyImage.value = masterKey ?? null
+      const expectedAnswers = getExpectedAnswers(masterKeyImage.value)
+      scoredImages.value = (students ?? []).map((img) =>
+        normalizeImage(img, [...expectedAnswers])
+      )
+      sessionStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ students: students ?? [], masterKey: masterKeyImage.value })
+      )
+      return
+    }
   }
 
   const cached = sessionStorage.getItem(STORAGE_KEY)
   if (cached) {
     try {
-      const parsed = JSON.parse(cached) as IncomingImage[]
-      scoredImages.value = parsed.map(normalizeImage)
+      const parsed = JSON.parse(cached) as ResultsPayload | IncomingImage[]
+      const { masterKey, students } = extractPayload(parsed)
+      masterKeyImage.value = masterKey ?? null
+      const expectedAnswers = getExpectedAnswers(masterKeyImage.value)
+      scoredImages.value = (students ?? []).map((img) =>
+        normalizeImage(img, [...expectedAnswers])
+      )
       return
     } catch (err) {
       console.warn('Unable to parse cached results', err)
@@ -358,7 +420,7 @@ onMounted(() => {
 const goToLabel = () => {
   router.push({
     name: 'label',
-    state: { files: scoredImages.value }
+    state: { files: scoredImages.value, masterKey: masterKeyImage.value }
   })
 }
 
@@ -395,6 +457,12 @@ const closeModal = () => {
 const selectedImage = computed(() =>
   selectedIndex.value !== null ? scoredImages.value[selectedIndex.value] : null
 )
+
+const showMasterWarning = computed(() => {
+  if (!masterKeyImage.value) return true
+  const expectedAnswers = getExpectedAnswers(masterKeyImage.value)
+  return expectedAnswers.length === 0 || expectedAnswers.every((value) => !value)
+})
 </script>
 
 <style scoped>
@@ -486,6 +554,15 @@ h1 {
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
+}
+
+.warning-banner {
+  border: 1px solid #ffcc80;
+  background: #fff7e6;
+  color: #8a5a00;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  font-size: 0.95rem;
 }
 
 .image-section {
