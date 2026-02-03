@@ -110,7 +110,7 @@
               
               <button 
                 @click="applyLabelsToAll" 
-                :disabled="isMasterView || !currentImage?.labels || currentImage.labels.length === 0 || isProcessingOCR" 
+                :disabled="!currentImage?.labels || currentImage.labels.length === 0 || isProcessingOCR" 
                 class="apply-all-btn"
               >
                 {{ isProcessingOCR ? '套用中...' : '全部套用' }}
@@ -149,7 +149,16 @@
                     </div>
                     <div v-else class="label-expected">
                       <span class="input-prefix">正解:</span>
-                      <span class="expected-value">{{ label.expectedAnswer || '—' }}</span>
+                      <input
+                        type="text"
+                        v-model="label.expectedAnswer"
+                        maxlength="4"
+                        class="expected-value"
+                        :ref="(el) => { if(el) inputRefs[index] = el as HTMLInputElement }"
+                        @focus="selectLabel(index)"
+                        @keydown="handleInputKeydown(index, $event)"
+                        @click.stop
+                      />
                     </div>
                   </div>
                 </div>
@@ -591,6 +600,7 @@ const selectLabel = (index: number) => {
 const handleInputKeydown = (index: number, event: KeyboardEvent) => {
   const label = currentImage.value?.labels?.[index]
   if (!label) return
+  const inputValue = isMasterView.value ? label.expectedAnswer : label.answer
 
   // 1. Enter 鍵 -> 跳到下一個輸入框
   if (event.key === 'Enter') {
@@ -604,7 +614,7 @@ const handleInputKeydown = (index: number, event: KeyboardEvent) => {
   }
 
   // 2. Backspace/Delete 鍵 -> 如果是空的則刪除框框
-  if ((event.key === 'Backspace' || event.key === 'Delete') && label.answer === '') {
+  if ((event.key === 'Backspace' || event.key === 'Delete') && (inputValue ?? '') === '') {
     event.preventDefault()
     removeLabel(index)
   }
@@ -950,7 +960,6 @@ const previousImage = () => {
 const applyLabelsToAll = async () => {
   // 1. 基本檢查
   if (!currentImage.value?.labels || currentImage.value.labels.length === 0) return
-  if (currentImage.value.role !== 'student') return
 
   const totalTargets = studentImages.value.length + (masterKeyImage.value ? 1 : 0)
   const confirmMsg = `確定要將目前的 ${currentImage.value.labels.length} 個標註框與答案套用到所有 ${totalTargets} 張圖片嗎？\n\n注意：這將會覆蓋其他圖片現有的標註，並重新執行 OCR 辨識！`
@@ -960,10 +969,11 @@ const applyLabelsToAll = async () => {
 
   try {
     // 2. 準備「乾淨」的樣板
+    const isMasterSource = currentImage.value.role === 'master'
     const sourceLabels = currentImage.value.labels.map(label => ({
       ...label,
       recognizedAnswer: undefined,
-      expectedAnswer: undefined,
+      expectedAnswer: isMasterSource ? label.expectedAnswer : undefined,
       ocrCandidates: undefined,
       isCorrect: undefined
     }))
@@ -980,14 +990,21 @@ const applyLabelsToAll = async () => {
     }
 
     studentImages.value.forEach(img => {
-      img.labels = sourceLabels.map(label => ({ ...label }))
+      img.labels = sourceLabels.map(label => ({
+        ...label,
+        answer: isMasterSource ? '' : label.answer
+      }))
       img.predictionsLoaded = true
       img.predictionError = undefined
       targets.push(img)
     })
 
     for (const targetImg of targets) {
-      await runOCRForImage(targetImg, targetImg.role)
+      if (targetImg.role === 'student') {
+        await runOCRForImage(targetImg, 'student')
+      } else if (!isMasterSource) {
+        await runOCRForImage(targetImg, 'master')
+      }
     }
 
     alert('已成功套用！系統已完成 OCR 辨識。')
