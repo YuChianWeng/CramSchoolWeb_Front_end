@@ -1,6 +1,6 @@
 <template>
   <div class="upload-container">
-    <h1>Upload Images</h1>
+    <h1>上傳圖片</h1>
     <div class="upload-area">
       <div class="upload-section">
         <h2>標準答案卷（Master Key）</h2>
@@ -27,7 +27,7 @@
             <div class="file-item">
               <img :src="masterFile.preview" :alt="masterFile.name" class="preview-image" />
               <p class="file-name">{{ masterFile.name }}</p>
-              <button @click="clearMaster" class="remove-btn">Remove</button>
+              <button @click="clearMaster" class="remove-btn">移除</button>
             </div>
           </div>
         </div>
@@ -55,12 +55,12 @@
           <button @click="triggerFileInput('students')" class="select-btn">選擇學生考卷</button>
         </div>
         <div v-if="studentFiles.length > 0" class="file-list">
-          <h3>Selected Images ({{ studentFiles.length }})</h3>
+          <h3>已選擇圖片 ({{ studentFiles.length }})</h3>
           <div class="file-grid">
             <div v-for="(file, index) in studentFiles" :key="index" class="file-item">
               <img :src="file.preview" :alt="file.name" class="preview-image" />
               <p class="file-name">{{ file.name }}</p>
-              <button @click="removeStudent(index)" class="remove-btn">Remove</button>
+              <button @click="removeStudent(index)" class="remove-btn">移除</button>
             </div>
           </div>
         </div>
@@ -69,13 +69,13 @@
 
     <div v-if="masterFile || studentFiles.length > 0" class="file-list">
       <div class="action-buttons">
-        <button @click="clearAll" class="clear-btn">Clear All</button>
+        <button @click="clearAll" class="clear-btn">清除全部</button>
         <button
           @click="uploadFiles"
           class="upload-btn"
           :disabled="isUploading"
         >
-          {{ isUploading ? 'Uploading...' : 'Upload & Label' }}
+          {{ isUploading ? '上傳中...' : '上傳並標註' }}
         </button>
       </div>
     </div>

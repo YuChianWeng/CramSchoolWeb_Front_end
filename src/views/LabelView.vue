@@ -21,7 +21,7 @@
             :class="{ active: viewMode === 'master' }"
             @click="viewMode = 'master'"
           >
-            標準卷檢視
+            答案卷檢視
           </button>
         </div>
         <div class="image-list">
@@ -1554,13 +1554,15 @@ canvas {
 }
 
 .expected-value {
-  min-width: 70px;
+  width: 70px;
   padding: 4px 8px;
+  border: 2px solid #ddd;
   border-radius: 6px;
   background-color: #fff7e6;
   color: #8a5a00;
   text-align: center;
-  font-size: 1.1rem;
+  font-size: 1.2rem;
+  font-weight: bold;
 }
 
 .input-prefix {
