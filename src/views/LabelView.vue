@@ -180,7 +180,7 @@
                 :disabled="currentImageIndex === 0"
                 class="nav-btn"
               >
-                ← Previous
+                ← 上一張
               </button>
               <span class="image-counter">
                 {{ currentImageIndex + 1 }} / {{ displayedImages.length }}
@@ -190,14 +190,14 @@
                 :disabled="currentImageIndex === displayedImages.length - 1"
                 class="nav-btn"
               >
-                Next →
+                下一張 →
               </button>
             </div>
 
             <div class="action-buttons">
-              <button @click="clearLabels" class="clear-labels-btn">Clear Labels</button>
-              <button @click="exportLabels" class="export-btn">Export Labels</button>
-              <button @click="goToResults" class="results-btn">View Results</button>
+              <button @click="clearLabels" class="clear-labels-btn">清除標註</button>
+              <button @click="exportLabels" class="export-btn">匯出標註</button>
+              <button @click="goToResults" class="results-btn">查看結果</button>
             </div>
           </div>
         </div>

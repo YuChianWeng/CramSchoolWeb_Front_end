@@ -146,6 +146,10 @@ interface LabelResult {
   y?: number
   width?: number
   height?: number
+  ocrCandidates?: {
+    chinese: string
+    digit: string
+  }
 }
 
 interface IncomingImage {
@@ -268,11 +272,20 @@ const normalizeImage = (
   expectedAnswers: string[] = []
 ): NormalizedImage => {
   const labels = (img.labels ?? []).map((label, index) => {
-    const normalizedRecognized = normalizeAnswer(label.recognizedAnswer)
     const normalizedAnswer = normalizeAnswer(label.answer)
     const expectedFromMaster = expectedAnswers[index] || ''
     const expectedAnswer =
       expectedFromMaster || normalizeAnswer(label.expectedAnswer) || normalizedAnswer
+
+    // 智能選擇 OCR 結果：根據正解是數字還是中文
+    let normalizedRecognized = normalizeAnswer(label.recognizedAnswer)
+    if (label.ocrCandidates && expectedAnswer) {
+      const isExpectedDigit = /^\d+$/.test(expectedAnswer.trim())
+      normalizedRecognized = isExpectedDigit
+        ? (label.ocrCandidates.digit || '').trim()
+        : (label.ocrCandidates.chinese || '').trim()
+    }
+
     let isCorrect = label.isCorrect
     if (typeof isCorrect !== 'boolean' && expectedAnswer && normalizedRecognized) {
       isCorrect = normalizedRecognized === normalizeAnswer(expectedAnswer)
