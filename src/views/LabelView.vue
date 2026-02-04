@@ -108,12 +108,20 @@
                   重新偵測
                 </button>
               
-              <button 
-                @click="applyLabelsToAll" 
-                :disabled="!currentImage?.labels || currentImage.labels.length === 0 || isProcessingOCR" 
+              <button
+                @click="applyLabelsToAll"
+                :disabled="!currentImage?.labels || currentImage.labels.length === 0"
                 class="apply-all-btn"
               >
-                {{ isProcessingOCR ? '辨識中...' : '全部套用(答案辨識)' }}
+                全部套用
+              </button>
+
+              <button
+                @click="detectAnswers"
+                :disabled="isProcessingOCR"
+                class="detect-answers-btn"
+              >
+                {{ isProcessingOCR ? '辨識中...' : '答案偵測' }}
               </button>
             </div>
 
@@ -955,49 +963,72 @@ const previousImage = () => {
   }
 }
 
-// [修改] 將當前圖片的標註套用到所有圖片 (修正：清除舊 OCR 結果並重新辨識)
-const applyLabelsToAll = async () => {
+// [修改] 將當前圖片的標註框套用到所有圖片（不執行OCR）
+const applyLabelsToAll = () => {
   // 1. 基本檢查
   if (!currentImage.value?.labels || currentImage.value.labels.length === 0) return
 
   const totalTargets = studentImages.value.length + (masterKeyImage.value ? 1 : 0)
-  const confirmMsg = `確定要將目前的 ${currentImage.value.labels.length} 個標註框與答案套用到所有 ${totalTargets} 張圖片嗎？\n\n注意：這將會覆蓋其他圖片現有的標註，並重新執行 OCR 辨識！`
+  const confirmMsg = `確定要將目前的 ${currentImage.value.labels.length} 個標註框套用到所有 ${totalTargets} 張圖片嗎？\n\n注意：這將會覆蓋其他圖片現有的標註！`
+  if (!confirm(confirmMsg)) return
+
+  // 2. 準備「乾淨」的樣板
+  const isMasterSource = currentImage.value.role === 'master'
+  const sourceLabels = currentImage.value.labels.map(label => ({
+    ...label,
+    recognizedAnswer: undefined,
+    expectedAnswer: isMasterSource ? label.expectedAnswer : undefined,
+    ocrCandidates: undefined,
+    isCorrect: undefined
+  }))
+
+  if (masterKeyImage.value) {
+    masterKeyImage.value.labels = sourceLabels.map(label => ({
+      ...label,
+      answer: ''
+    }))
+    masterKeyImage.value.predictionsLoaded = true
+    masterKeyImage.value.predictionError = undefined
+  }
+
+  studentImages.value.forEach(img => {
+    img.labels = sourceLabels.map(label => ({
+      ...label,
+      answer: isMasterSource ? '' : label.answer
+    }))
+    img.predictionsLoaded = true
+    img.predictionError = undefined
+  })
+
+  alert('已成功套用標註框！')
+}
+
+// [新增] 對所有有標註框的圖片執行答案偵測
+const detectAnswers = async () => {
+  // 收集所有有標註框的圖片
+  const targets: ImageData[] = []
+
+  if (masterKeyImage.value && masterKeyImage.value.labels && masterKeyImage.value.labels.length > 0) {
+    targets.push(masterKeyImage.value)
+  }
+
+  studentImages.value.forEach(img => {
+    if (img.labels && img.labels.length > 0) {
+      targets.push(img)
+    }
+  })
+
+  if (targets.length === 0) {
+    alert('沒有可以偵測的標註框！請先建立標註。')
+    return
+  }
+
+  const confirmMsg = `確定要對 ${targets.length} 張有標註框的圖片執行答案偵測嗎？`
   if (!confirm(confirmMsg)) return
 
   isProcessingOCR.value = true
 
   try {
-    // 2. 準備「乾淨」的樣板
-    const isMasterSource = currentImage.value.role === 'master'
-    const sourceLabels = currentImage.value.labels.map(label => ({
-      ...label,
-      recognizedAnswer: undefined,
-      expectedAnswer: isMasterSource ? label.expectedAnswer : undefined,
-      ocrCandidates: undefined,
-      isCorrect: undefined
-    }))
-
-    const targets: ImageData[] = []
-    if (masterKeyImage.value) {
-      masterKeyImage.value.labels = sourceLabels.map(label => ({
-        ...label,
-        answer: ''
-      }))
-      masterKeyImage.value.predictionsLoaded = true
-      masterKeyImage.value.predictionError = undefined
-      targets.push(masterKeyImage.value)
-    }
-
-    studentImages.value.forEach(img => {
-      img.labels = sourceLabels.map(label => ({
-        ...label,
-        answer: isMasterSource ? '' : label.answer
-      }))
-      img.predictionsLoaded = true
-      img.predictionError = undefined
-      targets.push(img)
-    })
-
     for (const targetImg of targets) {
       if (targetImg.role === 'student') {
         await runOCRForImage(targetImg, 'student')
@@ -1006,7 +1037,10 @@ const applyLabelsToAll = async () => {
       }
     }
 
-    alert('已成功套用！系統已完成 OCR 辨識。')
+    alert('答案偵測完成！')
+  } catch (error) {
+    console.error('答案偵測失敗:', error)
+    alert('答案偵測過程中發生錯誤，請查看控制台。')
   } finally {
     isProcessingOCR.value = false
   }
@@ -1320,15 +1354,12 @@ canvas {
   background-color: #673ab7; /* 紫色，代表批次處理 */
   color: #fff;
   border: none;
-  padding: 0.4rem 0.8rem; /* 稍微大一點點 */
+  padding: 0.4rem 0.8rem;
   border-radius: 4px;
   cursor: pointer;
   font-size: 0.9rem;
   margin-left: 10px; /* 與左邊按鈕拉開距離 */
   transition: background-color 0.2s;
-  display: flex;
-  align-items: center;
-  gap: 4px;
 }
 
 .apply-all-btn:hover {
@@ -1337,6 +1368,28 @@ canvas {
 
 .apply-all-btn:disabled {
   background-color: #b39ddb;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.detect-answers-btn {
+  background-color: #ff9800; /* 橙色，代表辨識功能 */
+  color: #fff;
+  border: none;
+  padding: 0.4rem 0.8rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  margin-left: 10px;
+  transition: background-color 0.2s;
+}
+
+.detect-answers-btn:hover {
+  background-color: #f57c00;
+}
+
+.detect-answers-btn:disabled {
+  background-color: #ffcc80;
   cursor: not-allowed;
   opacity: 0.7;
 }

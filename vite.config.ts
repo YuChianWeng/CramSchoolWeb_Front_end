@@ -29,7 +29,7 @@ export default defineConfig({
       },
       // 2. 專門給 YOLO 預測服務 (8082)
       '/api/predict': {
-        target: 'http://140.115.54.239:8082',
+        target: 'http://140.115.54.241:8082',
         changeOrigin: true,
         secure: false,
         rewrite: (path) => path.replace(/^\/api\/predict/, '/predict'),
