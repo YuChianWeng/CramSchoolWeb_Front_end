@@ -141,7 +141,7 @@
                   :key="index"
                   class="label-item"
                   :class="{ 'selected': index === selectedLabelIndex }"
-                  @click="focusLabelInput(index)"
+                  @click="isMasterView ? focusLabelInput(index) : selectLabel(index)"
                 >
                   <button @click.stop="removeLabel(index)" class="remove-label-btn">×</button>
 
@@ -320,15 +320,22 @@ onMounted(async () => {
   }
   currentImageIndex.value = 0
 
-  // [新增] 自動偵測第一張學生考卷並套用到答案卷
-  if (studentImages.value.length > 0 && masterKeyImage.value) {
-    const firstStudent = studentImages.value[0]
-    if (firstStudent && firstStudent.preview) {
-      await fetchPredictionsForImage(firstStudent)
+  // 自動偵測答案卷，排序後套用到所有學生卷
+  if (masterKeyImage.value && masterKeyImage.value.preview) {
+    await fetchPredictionsForImage(masterKeyImage.value)
 
-      // 將偵測到的框框套用到答案卷
-      if (firstStudent && firstStudent.labels && firstStudent.labels.length > 0) {
-        masterKeyImage.value.labels = firstStudent.labels.map(label => ({
+    if (masterKeyImage.value.labels && masterKeyImage.value.labels.length > 0) {
+      // 自動排序
+      const previewImg = await loadPreviewImage(masterKeyImage.value.preview)
+      const isVertical = previewImg.height > previewImg.width
+      masterKeyImage.value.labels = isVertical
+        ? sortLabelsVertical(masterKeyImage.value.labels)
+        : sortLabelsRightToLeft(masterKeyImage.value.labels)
+
+      // 套用到所有學生卷
+      const sourceLabels = masterKeyImage.value.labels
+      studentImages.value.forEach(student => {
+        student.labels = sourceLabels.map(label => ({
           ...label,
           answer: '',
           recognizedAnswer: undefined,
@@ -336,9 +343,9 @@ onMounted(async () => {
           ocrCandidates: undefined,
           isCorrect: undefined
         }))
-        masterKeyImage.value.predictionsLoaded = true
-        masterKeyImage.value.predictionError = undefined
-      }
+        student.predictionsLoaded = true
+        student.predictionError = undefined
+      })
     }
   }
 
