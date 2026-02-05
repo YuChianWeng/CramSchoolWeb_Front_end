@@ -194,6 +194,13 @@
               </button>
             </div>
 
+            <div class="auto-apply-option">
+              <label class="checkbox-label">
+                <input type="checkbox" v-model="autoApplyMasterToResults" />
+                <span>自動套用答案卷標註到所有考卷</span>
+              </label>
+            </div>
+
             <div class="action-buttons">
               <button @click="clearLabels" class="clear-labels-btn">清除標註</button>
               <button @click="exportLabels" class="export-btn">匯出標註</button>
@@ -248,7 +255,7 @@ const router = useRouter()
 const canvas = ref<HTMLCanvasElement | null>(null)
 const studentImages = ref<ImageData[]>([])
 const masterKeyImage = ref<ImageData | null>(null)
-const viewMode = ref<'student' | 'master'>('student')
+const viewMode = ref<'student' | 'master'>('master')
 const currentImageIndex = ref(0)
 const currentClass = ref(DEFAULT_CLASS)
 const isDrawing = ref(false)
@@ -265,6 +272,7 @@ const zoom = ref(1)
 
 const selectedLabelIndex = ref<number>(-1)
 const inputRefs = ref<HTMLInputElement[]>([])
+const autoApplyMasterToResults = ref(true) // 自動套用答案卷到結果頁的開關
 
 const displayedImages = computed(() =>
   viewMode.value === 'student'
@@ -282,7 +290,7 @@ onBeforeUpdate(() => {
   inputRefs.value = []
 })
 
-onMounted(() => {
+onMounted(async () => {
   // 註冊全域鍵盤監聽 (處理非輸入框時的刪除)
   window.addEventListener('keydown', handleGlobalKeydown)
 
@@ -316,6 +324,29 @@ onMounted(() => {
     ]
   }
   currentImageIndex.value = 0
+
+  // [新增] 自動偵測第一張學生考卷並套用到答案卷
+  if (studentImages.value.length > 0 && masterKeyImage.value) {
+    const firstStudent = studentImages.value[0]
+    if (firstStudent && firstStudent.preview) {
+      await fetchPredictionsForImage(firstStudent)
+
+      // 將偵測到的框框套用到答案卷
+      if (firstStudent && firstStudent.labels && firstStudent.labels.length > 0) {
+        masterKeyImage.value.labels = firstStudent.labels.map(label => ({
+          ...label,
+          answer: '',
+          recognizedAnswer: undefined,
+          expectedAnswer: undefined,
+          ocrCandidates: undefined,
+          isCorrect: undefined
+        }))
+        masterKeyImage.value.predictionsLoaded = true
+        masterKeyImage.value.predictionError = undefined
+      }
+    }
+  }
+
   nextTick(() => {
     handleImageChange()
   })
@@ -754,8 +785,8 @@ const extractBase64FromPreview = (preview: string) => {
   return separatorIndex >= 0 ? preview.slice(separatorIndex + 1) : preview
 }
 
-const fetchPredictionsForCurrentImage = async () => {
-  const img = currentImage.value
+// [新增] 通用函數：對任意圖片執行 YOLO 偵測
+const fetchPredictionsForImage = async (img: ImageData) => {
   if (!img || img.role !== 'student' || !img.preview || img.isPredicting || img.predictionsLoaded) return
 
   img.isPredicting = true
@@ -768,7 +799,7 @@ const fetchPredictionsForCurrentImage = async () => {
     const image_base64 = base64.includes('base64,')
     ? base64.split('base64,')[1]
     : base64
-    const response = await fetch('/api/predict', { 
+    const response = await fetch('/api/predict', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -808,14 +839,21 @@ const fetchPredictionsForCurrentImage = async () => {
 
     img.labels = mappedLabels
     img.predictionsLoaded = true
-    loadImage() // [新增這一行] 框框出來後，馬上叫後端去辨識裡面的字
-    await runOCRForImage(img, 'student'); // 背景跑 OCR
   } catch (error: any) {
     console.error('Error fetching predictions:', error)
     img.predictionError = error?.message || 'Unable to fetch predictions'
   } finally {
     img.isPredicting = false
   }
+}
+
+const fetchPredictionsForCurrentImage = async () => {
+  const img = currentImage.value
+  if (!img) return
+
+  await fetchPredictionsForImage(img)
+  loadImage()
+  await runOCRForImage(img, 'student'); // 背景跑 OCR
 }
 
 const retryPrediction = () => {
@@ -1003,6 +1041,19 @@ const applyLabelsToAll = () => {
   alert('已成功套用標註框！')
 }
 
+// [新增] 排序標註：從右上到左下（先上到下，再右到左）
+const sortLabelsRightToLeft = (labels: Label[]): Label[] => {
+  return [...labels].sort((a, b) => {
+    // 先按 Y 座標排序（小到大，從上到下）
+    const yDiff = Math.abs(a.y - b.y)
+    if (yDiff > 10) { // 如果 Y 座標差異大於 10px，認為是不同行
+      return a.y - b.y
+    }
+    // 同一行內，按 X 座標排序（大到小，從右到左）
+    return b.x - a.x
+  })
+}
+
 // [新增] 對所有有標註框的圖片執行答案偵測
 const detectAnswers = async () => {
   // 收集所有有標註框的圖片
@@ -1035,7 +1086,15 @@ const detectAnswers = async () => {
       } else {
         await runOCRForImage(targetImg, 'master')
       }
+
+      // [新增] 偵測完成後，重新排序標註（從右上到左下）
+      if (targetImg.labels && targetImg.labels.length > 0) {
+        targetImg.labels = sortLabelsRightToLeft(targetImg.labels)
+      }
     }
+
+    // 重新繪製畫面
+    loadImage()
 
     alert('答案偵測完成！')
   } catch (error) {
@@ -1085,6 +1144,30 @@ const exportLabels = () => {
 
 const goToResults = () => {
   if (!currentImage.value) return;
+
+  // [新增] 如果開關開啟，自動套用答案卷標註到所有學生考卷
+  if (autoApplyMasterToResults.value && masterKeyImage.value?.labels && masterKeyImage.value.labels.length > 0) {
+    const masterLabels = masterKeyImage.value.labels
+
+    studentImages.value.forEach(student => {
+      // 為每個學生建立新的 labels，基於 master 的框框位置和 expectedAnswer
+      student.labels = masterLabels.map((masterLabel, index) => {
+        // 如果學生已經有這個位置的標註資料，保留它的 OCR 結果
+        const existingLabel = student.labels?.[index]
+
+        return {
+          ...masterLabel, // 複製框框位置和 class
+          expectedAnswer: masterLabel.expectedAnswer, // 複製正解
+          answer: existingLabel?.answer || '', // 保留學生的答案（如果有）
+          recognizedAnswer: existingLabel?.recognizedAnswer, // 保留 OCR 結果
+          ocrCandidates: existingLabel?.ocrCandidates, // 保留 OCR 候選
+          isCorrect: existingLabel?.isCorrect // 保留判定結果
+        }
+      })
+      student.predictionsLoaded = true
+      student.predictionError = undefined
+    })
+  }
 
   // 1. 深拷貝整理資料
   const cleanMasterKey = masterKeyImage.value
@@ -1654,6 +1737,41 @@ canvas {
 .image-counter {
   font-weight: bold;
   color: #2c3e50;
+}
+
+.auto-apply-option {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  background-color: #f9f9f9;
+  border-radius: 6px;
+  border: 1px solid #e0e0e0;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  user-select: none;
+  color: #2c3e50;
+  font-weight: 500;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #42b883;
+}
+
+.checkbox-label span {
+  font-size: 0.95rem;
+}
+
+.checkbox-label:hover {
+  color: #42b883;
 }
 
 .action-buttons {
