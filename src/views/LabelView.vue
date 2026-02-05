@@ -457,17 +457,13 @@ const runOCRForImage = async (img: ImageData, target: 'student' | 'master') => {
       }))
     };
 
-    // 2. 呼叫後端（加入 30 秒逾時）
+    // 2. 呼叫後端
     const endpoint = target === 'master' ? '/ocr_google' : '/api/ocr_process'
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 30000)
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(inputPayload),
-      signal: controller.signal
+      body: JSON.stringify(inputPayload)
     });
-    clearTimeout(timeoutId)
 
     if (!response.ok) throw new Error('OCR API Error');
     const resultData = await response.json();
