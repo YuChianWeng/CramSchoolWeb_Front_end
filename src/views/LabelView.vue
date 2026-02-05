@@ -102,7 +102,7 @@
               <span class="single-class-label">{{ DEFAULT_CLASS }}</span>
                 <button
                   @click="retryPrediction"
-                  :disabled="currentImage?.isPredicting || isMasterView"
+                  :disabled="currentImage?.isPredicting"
                   class="retry-btn"
                 >
                   重新偵測
@@ -114,6 +114,14 @@
                 class="apply-all-btn"
               >
                 全部套用
+              </button>
+
+              <button
+                @click="autoSort"
+                :disabled="!currentImage?.labels || currentImage.labels.length === 0"
+                class="auto-sort-btn"
+              >
+                自動排序
               </button>
 
               <button
@@ -142,20 +150,7 @@
                       {{ label.class }} ({{ index + 1 }})
                     </span>
 
-                    <div v-if="!isMasterView" class="label-input-group">
-                      <span class="input-prefix">答:</span>
-                      <input
-                        type="text"
-                        v-model="label.answer"
-                        maxlength="4"
-                        :ref="(el) => { if(el) inputRefs[index] = el as HTMLInputElement }"
-                        @focus="selectLabel(index)"
-                        @keydown="handleInputKeydown(index, $event)"
-                        @click.stop
-                        @input="updateRecognizedAnswer(label)"
-                      />
-                    </div>
-                    <div v-else class="label-expected">
+                    <div v-if="isMasterView" class="label-expected">
                       <span class="input-prefix">正解:</span>
                       <input
                         type="text"
@@ -787,7 +782,7 @@ const extractBase64FromPreview = (preview: string) => {
 
 // [新增] 通用函數：對任意圖片執行 YOLO 偵測
 const fetchPredictionsForImage = async (img: ImageData) => {
-  if (!img || img.role !== 'student' || !img.preview || img.isPredicting || img.predictionsLoaded) return
+  if (!img || !img.preview || img.isPredicting || img.predictionsLoaded) return
 
   img.isPredicting = true
   img.predictionError = undefined
@@ -858,7 +853,7 @@ const fetchPredictionsForCurrentImage = async () => {
 
 const retryPrediction = () => {
   const img = currentImage.value
-  if (!img || img.role !== 'student' || img.isPredicting) return
+  if (!img || img.isPredicting) return
 
   img.predictionsLoaded = false
   img.predictionError = undefined
@@ -1052,6 +1047,48 @@ const sortLabelsRightToLeft = (labels: Label[]): Label[] => {
     // 同一行內，按 X 座標排序（大到小，從右到左）
     return b.x - a.x
   })
+}
+
+// [新增] 直式考卷排序：左半部優先，每半部內由上到下、由左到右
+const sortLabelsVertical = (labels: Label[]): Label[] => {
+  if (labels.length === 0) return labels
+
+  const centerXs = labels.map(l => l.x + l.width / 2).sort((a, b) => a - b)
+  const midLine = centerXs[Math.floor(centerXs.length / 2)] ?? 0
+
+  return [...labels].sort((a, b) => {
+    const aIsLeft = (a.x + a.width / 2) < midLine
+    const bIsLeft = (b.x + b.width / 2) < midLine
+
+    // 左半部優先於右半部
+    if (aIsLeft !== bIsLeft) return aIsLeft ? -1 : 1
+
+    // 同一半部內：先按 Y（由上到下）
+    const yDiff = Math.abs(a.y - b.y)
+    if (yDiff > 10) return a.y - b.y
+
+    // 同一行內：按 X（由左到右）
+    return a.x - b.x
+  })
+}
+
+// [新增] 自動排序：根據圖片寬高判斷直式/橫式並排序
+const autoSort = async () => {
+  const img = currentImage.value
+  if (!img?.labels || img.labels.length === 0 || !img.preview) return
+
+  const previewImg = await loadPreviewImage(img.preview)
+  const isVertical = previewImg.height > previewImg.width
+
+  if (isVertical) {
+    img.labels = sortLabelsVertical(img.labels)
+    alert('已偵測為直式考卷，排序完成（左半部優先，由上到下、由左到右）')
+  } else {
+    img.labels = sortLabelsRightToLeft(img.labels)
+    alert('已偵測為橫式考卷，排序完成（由上到下、由右到左）')
+  }
+
+  loadImage()
 }
 
 // [新增] 對所有有標註框的圖片執行答案偵測
@@ -1451,6 +1488,28 @@ canvas {
 
 .apply-all-btn:disabled {
   background-color: #b39ddb;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.auto-sort-btn {
+  background-color: #009688;
+  color: #fff;
+  border: none;
+  padding: 0.4rem 0.8rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  margin-left: 10px;
+  transition: background-color 0.2s;
+}
+
+.auto-sort-btn:hover {
+  background-color: #00796b;
+}
+
+.auto-sort-btn:disabled {
+  background-color: #80cbc4;
   cursor: not-allowed;
   opacity: 0.7;
 }

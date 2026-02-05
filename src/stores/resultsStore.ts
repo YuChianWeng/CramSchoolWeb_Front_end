@@ -1,6 +1,6 @@
-let resultsCache: any[] | null = null
+let resultsCache: Record<string, any> | any[] | null = null
 
-export const setResultsData = (data: any[]) => {
+export const setResultsData = (data: Record<string, any> | any[]) => {
   resultsCache = data
 }
 
