@@ -142,7 +142,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { getResultsData } from '../stores/resultsStore'
+import { getResultsData, updateStudentImages, updateMasterImage } from '../stores/resultsStore'
 
 // OCR 處理狀態
 const isProcessingOCR = ref(false)
@@ -588,10 +588,32 @@ onMounted(async () => {
 })
 
 const goToLabel = () => {
-  router.push({
-    name: 'label',
-    state: { files: scoredImages.value, masterKey: masterKeyImage.value }
-  })
+  // 確保傳回的資料包含所有必要屬性，避免 LabelView 重新偵測
+  const filesForLabel = scoredImages.value.map(img => ({
+    ...img,
+    preview: img.preview || '',
+    role: 'student' as const,
+    predictionsLoaded: true,  // 已經有 labels，不需重新偵測
+    isPredicting: false,
+    predictionError: undefined
+  }))
+
+  const masterForLabel = masterKeyImage.value
+    ? {
+        ...masterKeyImage.value,
+        preview: masterKeyImage.value.preview || '',
+        role: 'master' as const,
+        predictionsLoaded: true,
+        isPredicting: false,
+        predictionError: undefined
+      }
+    : null
+
+  // 同步更新 store（統一的資料來源）
+  updateStudentImages(filesForLabel as any)
+  updateMasterImage(masterForLabel as any)
+
+  router.push({ name: 'label' })
 }
 
 const goToUpload = () => {

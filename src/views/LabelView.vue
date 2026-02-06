@@ -212,7 +212,7 @@
 import { ref, computed, onMounted, watch, nextTick, onBeforeUpdate, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../constants'
-import { setResultsData } from '../stores/resultsStore'
+import { setResultsData, getStoreData, hasData, updateStudentImages, updateMasterImage } from '../stores/resultsStore'
 
 const DEFAULT_CLASS = '答案區'
 
@@ -304,27 +304,32 @@ onMounted(async () => {
   window.addEventListener('keydown', handleKeyDown)
   window.addEventListener('keyup', handleKeyUp)
 
-  const state = history.state as { files?: ImageData[]; masterKey?: ImageData }
-  if (state?.files && state.files.length > 0) {
-    studentImages.value = state.files.map(f => ({
-      ...f,
-      labels: f.labels || [],
-      preview: f.preview,
-      predictionsLoaded: f.predictionsLoaded || false,
-      isPredicting: false,
-      predictionError: undefined,
-      role: 'student'
-    }))
-  }
-  if (state?.masterKey) {
-    masterKeyImage.value = {
-      ...state.masterKey,
-      labels: state.masterKey.labels || [],
-      preview: state.masterKey.preview,
-      predictionsLoaded: state.masterKey.predictionsLoaded || false,
-      isPredicting: false,
-      predictionError: undefined,
-      role: 'master'
+  // 從統一的 store 讀取資料
+  if (hasData()) {
+    const { studentImages: storedStudents, masterKeyImage: storedMaster } = getStoreData()
+
+    if (storedStudents.length > 0) {
+      studentImages.value = storedStudents.map((f: any) => ({
+        ...f,
+        labels: f.labels || [],
+        preview: f.preview,
+        predictionsLoaded: f.predictionsLoaded || false,
+        isPredicting: false,
+        predictionError: undefined,
+        role: 'student'
+      }))
+    }
+
+    if (storedMaster) {
+      masterKeyImage.value = {
+        ...storedMaster,
+        labels: storedMaster.labels || [],
+        preview: storedMaster.preview,
+        predictionsLoaded: storedMaster.predictionsLoaded || false,
+        isPredicting: false,
+        predictionError: undefined,
+        role: 'master'
+      }
     }
   }
   if (studentImages.value.length === 0) {
@@ -340,51 +345,58 @@ onMounted(async () => {
     handleImageChange()
   })
 
-  // 用第一張學生卷做 YOLO 偵測（手寫優化模型），然後套用到答案卷和其他學生卷
-  const firstStudent = studentImages.value[0]
-  if (firstStudent && firstStudent.preview) {
-    await fetchPredictionsForImage(firstStudent)
+  // 檢查是否已經有標註資料（例如從 ResultsView 返回）
+  const hasExistingLabels = studentImages.value.some(img => img.labels && img.labels.length > 0) ||
+    (masterKeyImage.value?.labels && masterKeyImage.value.labels.length > 0)
 
-    if (firstStudent.labels && firstStudent.labels.length > 0) {
-      // 自動排序
-      const previewImg = await loadPreviewImage(firstStudent.preview)
-      const isVertical = previewImg.height > previewImg.width
-      firstStudent.labels = isVertical
-        ? sortLabelsVertical(firstStudent.labels)
-        : sortLabelsRightToLeft(firstStudent.labels)
+  // 只有在沒有現有標註時才執行初始 YOLO 偵測
+  if (!hasExistingLabels) {
+    // 用第一張學生卷做 YOLO 偵測（手寫優化模型），然後套用到答案卷和其他學生卷
+    const firstStudent = studentImages.value[0]
+    if (firstStudent && firstStudent.preview) {
+      await fetchPredictionsForImage(firstStudent)
 
-      // 套用到答案卷
-      if (masterKeyImage.value) {
-        masterKeyImage.value.labels = firstStudent.labels.map(label => ({
-          ...label,
-          answer: '',
-          recognizedAnswer: undefined,
-          expectedAnswer: undefined,
-          ocrCandidates: undefined,
-          isCorrect: undefined
-        }))
-        masterKeyImage.value.predictionsLoaded = true
-        masterKeyImage.value.predictionError = undefined
+      if (firstStudent.labels && firstStudent.labels.length > 0) {
+        // 自動排序
+        const previewImg = await loadPreviewImage(firstStudent.preview)
+        const isVertical = previewImg.height > previewImg.width
+        firstStudent.labels = isVertical
+          ? sortLabelsVertical(firstStudent.labels)
+          : sortLabelsRightToLeft(firstStudent.labels)
+
+        // 套用到答案卷
+        if (masterKeyImage.value) {
+          masterKeyImage.value.labels = firstStudent.labels.map(label => ({
+            ...label,
+            answer: '',
+            recognizedAnswer: undefined,
+            expectedAnswer: undefined,
+            ocrCandidates: undefined,
+            isCorrect: undefined
+          }))
+          masterKeyImage.value.predictionsLoaded = true
+          masterKeyImage.value.predictionError = undefined
+        }
+
+        // 套用到其他學生卷
+        const sourceLabels = firstStudent.labels
+        studentImages.value.forEach((student, index) => {
+          if (index === 0) return // 跳過第一張（已經有了）
+          student.labels = sourceLabels.map(label => ({
+            ...label,
+            answer: '',
+            recognizedAnswer: undefined,
+            expectedAnswer: undefined,
+            ocrCandidates: undefined,
+            isCorrect: undefined
+          }))
+          student.predictionsLoaded = true
+          student.predictionError = undefined
+        })
+
+        // 偵測完成後重新繪製
+        loadImage()
       }
-
-      // 套用到其他學生卷
-      const sourceLabels = firstStudent.labels
-      studentImages.value.forEach((student, index) => {
-        if (index === 0) return // 跳過第一張（已經有了）
-        student.labels = sourceLabels.map(label => ({
-          ...label,
-          answer: '',
-          recognizedAnswer: undefined,
-          expectedAnswer: undefined,
-          ocrCandidates: undefined,
-          isCorrect: undefined
-        }))
-        student.predictionsLoaded = true
-        student.predictionError = undefined
-      })
-
-      // 偵測完成後重新繪製
-      loadImage()
     }
   }
 });
@@ -1247,13 +1259,17 @@ const goToResults = () => {
     : null
   const cleanStudents = JSON.parse(JSON.stringify(studentImages.value))
 
-  // 2. 存入 Store (這裡就不會報錯了，因為上面有 import)
+  // 2. 同步更新 store（保持資料持久）
+  updateStudentImages(cleanStudents)
+  updateMasterImage(cleanMasterKey)
+
+  // 3. 同時設定 resultsData（供 ResultsView 使用）
   setResultsData({
     masterKey: cleanMasterKey,
     students: cleanStudents
   });
 
-  // 3. 換頁
+  // 4. 換頁
   router.push({ name: 'results' });
 };
 </script>

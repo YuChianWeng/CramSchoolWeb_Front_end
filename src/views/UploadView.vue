@@ -83,11 +83,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { getStoreData, initializeFromUpload, hasData, clearAllData } from '../stores/resultsStore'
 
 interface FileWithPreview {
-  file: File
+  file?: File
   name: string
   preview: string
 }
@@ -100,6 +101,25 @@ const studentFiles = ref<FileWithPreview[]>([])
 const isDraggingMaster = ref(false)
 const isDraggingStudents = ref(false)
 const isUploading = ref(false)
+
+// 載入時檢查是否有現有資料
+onMounted(() => {
+  if (hasData()) {
+    const { studentImages, masterKeyImage } = getStoreData()
+    if (masterKeyImage) {
+      masterFile.value = {
+        name: masterKeyImage.name,
+        preview: masterKeyImage.preview
+      }
+    }
+    if (studentImages.length > 0) {
+      studentFiles.value = studentImages.map(img => ({
+        name: img.name,
+        preview: img.preview
+      }))
+    }
+  }
+})
 
 const triggerFileInput = (target: 'master' | 'students') => {
   if (target === 'master') {
@@ -184,6 +204,7 @@ const removeStudent = (index: number) => {
 const clearAll = () => {
   masterFile.value = null
   studentFiles.value = []
+  clearAllData() // 同時清除 store 資料
 }
 
 const uploadFiles = () => {
@@ -196,24 +217,29 @@ const uploadFiles = () => {
     return
   }
   isUploading.value = true
-  // TODO: Replace with actual upload logic in production
-  // This is a simulated upload for demonstration purposes
+
   setTimeout(() => {
     isUploading.value = false
+
     const masterData = {
       name: masterFile.value!.name,
       preview: masterFile.value!.preview,
-      labels: []
+      labels: [],
+      role: 'master' as const,
+      predictionsLoaded: false
     }
     const filesData = studentFiles.value.map(f => ({
       name: f.name,
       preview: f.preview,
-      labels: []
+      labels: [],
+      role: 'student' as const,
+      predictionsLoaded: false
     }))
-    router.push({ 
-      name: 'label',
-      state: { masterKey: masterData, files: filesData }
-    })
+
+    // 使用 store 保存資料
+    initializeFromUpload(filesData, masterData)
+
+    router.push({ name: 'label' })
   }, 1000)
 }
 </script>
