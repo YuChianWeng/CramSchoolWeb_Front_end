@@ -22,7 +22,7 @@ export default defineConfig({
     proxy: {
       // 1. 專門給 OCR 服務 (8083)
       '/api/ocr_process': {
-        target: 'http://140.115.54.241:8083',
+        target: 'http://140.115.54.239:8083',
         changeOrigin: true,
         secure: false,
         rewrite: (path) => path.replace(/^\/api\/ocr_process/, '/ocr'),

@@ -320,7 +320,12 @@ onMounted(async () => {
   }
   currentImageIndex.value = 0
 
-  // 自動偵測答案卷，排序後套用到所有學生卷
+  // 先顯示圖片
+  nextTick(() => {
+    handleImageChange()
+  })
+
+  // 然後才自動偵測答案卷，排序後套用到所有學生卷
   if (masterKeyImage.value && masterKeyImage.value.preview) {
     await fetchPredictionsForImage(masterKeyImage.value)
 
@@ -346,12 +351,11 @@ onMounted(async () => {
         student.predictionsLoaded = true
         student.predictionError = undefined
       })
+
+      // 偵測完成後重新繪製
+      loadImage()
     }
   }
-
-  nextTick(() => {
-    handleImageChange()
-  })
 });
 
 onUnmounted(() => {
@@ -457,20 +461,25 @@ const runOCRForImage = async (img: ImageData, target: 'student' | 'master') => {
       }))
     };
 
-    // 2. 呼叫後端
+    // 2. 呼叫後端（加入 30 秒逾時）
     const endpoint = target === 'master' ? '/ocr_google' : '/api/ocr_process'
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 30000)
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(inputPayload)
+      body: JSON.stringify(inputPayload),
+      signal: controller.signal
     });
+    clearTimeout(timeoutId)
 
     if (!response.ok) throw new Error('OCR API Error');
     const resultData = await response.json();
 
     // 3. 將回傳結果填入 labels
     const results = resultData.ocr_results || resultData.results || [];
-    
+    console.log('OCR 回傳結果:', JSON.stringify(results, null, 2)) // 偵錯用
+
     if (Array.isArray(results)) {
       results.forEach((res: any, index: number) => {
         // 確保對應的 label 還存在
@@ -478,9 +487,11 @@ const runOCRForImage = async (img: ImageData, target: 'student' | 'master') => {
           const targetLabel = img.labels[index];
           if (target === 'master') {
             // 優先抓取 google_text，避免 extractTextValue 誤抓 bbox 數字
-            targetLabel.expectedAnswer = res.google_text || extractTextValue(res)
+            const googleText = res.google_text ?? res.text ?? res.answer ?? ''
+            targetLabel.expectedAnswer = typeof googleText === 'string' ? googleText : ''
             targetLabel.ocrCandidates = undefined
             targetLabel.recognizedAnswer = undefined
+            console.log(`Label ${index}: expectedAnswer = "${targetLabel.expectedAnswer}"`) // 偵錯用
           } else {
             const candidate =
               res && (res.chinese !== undefined || res.digit !== undefined)
@@ -664,51 +675,55 @@ const handleInputKeydown = (index: number, event: KeyboardEvent) => {
 const startDrawing = (event: MouseEvent) => {
   if (!canvas.value) return
 
-  // 1. 如果是平移模式或按住 Alt，保持原樣
-  if (currentMode.value === 'pan' || event.button !== 0 || event.altKey) {
-    startPan(event)
-    return
-  }
+  // 判斷是否為拖移模式（拖移按鈕選中 或 按住 Alt）
+  const isPanMode = currentMode.value === 'pan' || event.altKey
 
   const { x, y } = getCanvasCoords(event)
-  
-  // [修正] 確保 labels 是一個陣列，如果是 undefined 則給空陣列
   const labels = currentImage.value?.labels || []
-  
-  // 2. 檢查是否點擊在現有的框框上
+
+  // 檢查是否點擊在現有的框框上
   let hitIndex = -1
   for (let i = labels.length - 1; i >= 0; i--) {
     const l = labels[i]
-    
-    // [修正] 紅字解決重點：如果 l 是 undefined，直接跳過這一次迴圈
-    if (!l) continue; 
-
+    if (!l) continue
     if (x >= l.x && x <= l.x + l.width && y >= l.y && y <= l.y + l.height) {
       hitIndex = i
       break
     }
   }
 
-  // 3. 如果點到了框框 -> 進入「拖曳模式」
-  if (hitIndex !== -1) {
-    draggingLabelIndex.value = hitIndex
-    selectedLabelIndex.value = hitIndex
-    
-    // [修正] 紅字解決重點：先取出該 label 並檢查是否存在
-    const targetLabel = labels[hitIndex]
-    if (targetLabel) {
-      dragOffset.value = {
-        x: x - targetLabel.x,
-        y: y - targetLabel.y
+  // === 拖移模式 ===
+  if (isPanMode) {
+    if (hitIndex !== -1) {
+      // 點到框框 → 移動框框
+      draggingLabelIndex.value = hitIndex
+      selectedLabelIndex.value = hitIndex
+      const targetLabel = labels[hitIndex]
+      if (targetLabel) {
+        dragOffset.value = {
+          x: x - targetLabel.x,
+          y: y - targetLabel.y
+        }
       }
+      focusLabelInput(hitIndex)
+      loadImage()
+    } else {
+      // 點到空白處 → 移動畫布
+      startPan(event)
     }
-    
-    focusLabelInput(hitIndex)
-    loadImage()
-    return 
+    return
   }
 
-  // 4. 沒點到框框 -> 清除選取並開始「畫新框」
+  // === 標註模式 ===
+  // 點到框框 → 選取該框框（不移動）
+  if (hitIndex !== -1) {
+    selectedLabelIndex.value = hitIndex
+    focusLabelInput(hitIndex)
+    loadImage()
+    return
+  }
+
+  // 點到空白處 → 清除選取並開始畫新框
   if (selectedLabelIndex.value !== -1) {
     selectedLabelIndex.value = -1
     loadImage()
@@ -1098,49 +1113,23 @@ const autoSort = async () => {
   loadImage()
 }
 
-// [新增] 對所有有標註框的圖片執行答案偵測
+// [修改] 只對答案卷執行答案偵測（學生卷 OCR 移至結果頁面）
 const detectAnswers = async () => {
-  // 收集所有有標註框的圖片
-  const targets: ImageData[] = []
-
-  if (masterKeyImage.value && masterKeyImage.value.labels && masterKeyImage.value.labels.length > 0) {
-    targets.push(masterKeyImage.value)
-  }
-
-  studentImages.value.forEach(img => {
-    if (img.labels && img.labels.length > 0) {
-      targets.push(img)
-    }
-  })
-
-  if (targets.length === 0) {
-    alert('沒有可以偵測的標註框！請先建立標註。')
+  // 只處理答案卷
+  if (!masterKeyImage.value || !masterKeyImage.value.labels || masterKeyImage.value.labels.length === 0) {
+    alert('請先在答案卷建立標註框！')
     return
   }
-
-  const confirmMsg = `確定要對 ${targets.length} 張有標註框的圖片執行答案偵測嗎？`
-  if (!confirm(confirmMsg)) return
 
   isProcessingOCR.value = true
 
   try {
-    for (const targetImg of targets) {
-      if (targetImg.role === 'student') {
-        await runOCRForImage(targetImg, 'student')
-      } else {
-        await runOCRForImage(targetImg, 'master')
-      }
-
-      // [新增] 偵測完成後，重新排序標註（從右上到左下）
-      if (targetImg.labels && targetImg.labels.length > 0) {
-        targetImg.labels = sortLabelsRightToLeft(targetImg.labels)
-      }
-    }
+    await runOCRForImage(masterKeyImage.value, 'master')
 
     // 重新繪製畫面
     loadImage()
 
-    alert('答案偵測完成！')
+    alert('答案卷偵測完成！正解已填入。')
   } catch (error) {
     console.error('答案偵測失敗:', error)
     alert('答案偵測過程中發生錯誤，請查看控制台。')
