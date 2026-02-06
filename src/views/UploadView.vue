@@ -11,7 +11,7 @@
           @drop.prevent="handleDrop('master', $event)"
           :class="{ 'drag-over': isDraggingMaster }"
         >
-          <div class="upload-icon">🗂️</div>
+          <div class="upload-icon">📁</div>
           <p>拖曳或點擊上傳 1 張標準答案卷</p>
           <input
             type="file"
@@ -42,7 +42,7 @@
           @drop.prevent="handleDrop('students', $event)"
           :class="{ 'drag-over': isDraggingStudents }"
         >
-          <div class="upload-icon">📁</div>
+          <div class="upload-icon">🗂️</div>
           <p>拖曳或點擊上傳多張學生考卷</p>
           <input
             type="file"

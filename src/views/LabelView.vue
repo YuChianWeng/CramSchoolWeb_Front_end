@@ -93,7 +93,7 @@
                 <button 
                   :class="{ active: currentMode === 'pan' }" 
                   @click="currentMode = 'pan'"
-                >✋ 拖移（或按住ALT）</button>
+                >✋ 拖移（或按住Ctrl）</button>
               </div>
             </div>
 
@@ -256,6 +256,7 @@ const currentClass = ref(DEFAULT_CLASS)
 const isDrawing = ref(false)
 const isPanning = ref(false)
 const currentMode = ref<'draw' | 'pan'>('draw')
+const isCtrlPressed = ref(false) // 追蹤 Ctrl 鍵狀態
 const isProcessingOCR = ref(false)
 const startX = ref(0)
 const startY = ref(0)
@@ -285,9 +286,23 @@ onBeforeUpdate(() => {
   inputRefs.value = []
 })
 
+// 監聽 Ctrl 鍵狀態
+const handleKeyDown = (event: KeyboardEvent) => {
+  if (event.key === 'Control') {
+    isCtrlPressed.value = true
+  }
+}
+const handleKeyUp = (event: KeyboardEvent) => {
+  if (event.key === 'Control') {
+    isCtrlPressed.value = false
+  }
+}
+
 onMounted(async () => {
-  // 註冊全域鍵盤監聽 (處理非輸入框時的刪除)
+  // 註冊全域鍵盤監聽
   window.addEventListener('keydown', handleGlobalKeydown)
+  window.addEventListener('keydown', handleKeyDown)
+  window.addEventListener('keyup', handleKeyUp)
 
   const state = history.state as { files?: ImageData[]; masterKey?: ImageData }
   if (state?.files && state.files.length > 0) {
@@ -325,21 +340,37 @@ onMounted(async () => {
     handleImageChange()
   })
 
-  // 然後才自動偵測答案卷，排序後套用到所有學生卷
-  if (masterKeyImage.value && masterKeyImage.value.preview) {
-    await fetchPredictionsForImage(masterKeyImage.value)
+  // 用第一張學生卷做 YOLO 偵測（手寫優化模型），然後套用到答案卷和其他學生卷
+  const firstStudent = studentImages.value[0]
+  if (firstStudent && firstStudent.preview) {
+    await fetchPredictionsForImage(firstStudent)
 
-    if (masterKeyImage.value.labels && masterKeyImage.value.labels.length > 0) {
+    if (firstStudent.labels && firstStudent.labels.length > 0) {
       // 自動排序
-      const previewImg = await loadPreviewImage(masterKeyImage.value.preview)
+      const previewImg = await loadPreviewImage(firstStudent.preview)
       const isVertical = previewImg.height > previewImg.width
-      masterKeyImage.value.labels = isVertical
-        ? sortLabelsVertical(masterKeyImage.value.labels)
-        : sortLabelsRightToLeft(masterKeyImage.value.labels)
+      firstStudent.labels = isVertical
+        ? sortLabelsVertical(firstStudent.labels)
+        : sortLabelsRightToLeft(firstStudent.labels)
 
-      // 套用到所有學生卷
-      const sourceLabels = masterKeyImage.value.labels
-      studentImages.value.forEach(student => {
+      // 套用到答案卷
+      if (masterKeyImage.value) {
+        masterKeyImage.value.labels = firstStudent.labels.map(label => ({
+          ...label,
+          answer: '',
+          recognizedAnswer: undefined,
+          expectedAnswer: undefined,
+          ocrCandidates: undefined,
+          isCorrect: undefined
+        }))
+        masterKeyImage.value.predictionsLoaded = true
+        masterKeyImage.value.predictionError = undefined
+      }
+
+      // 套用到其他學生卷
+      const sourceLabels = firstStudent.labels
+      studentImages.value.forEach((student, index) => {
+        if (index === 0) return // 跳過第一張（已經有了）
         student.labels = sourceLabels.map(label => ({
           ...label,
           answer: '',
@@ -360,6 +391,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalKeydown)
+  window.removeEventListener('keydown', handleKeyDown)
+  window.removeEventListener('keyup', handleKeyUp)
 })
 
 watch(currentImageIndex, () => {
@@ -374,18 +407,24 @@ watch(viewMode, () => {
 })
 
 const getCursorStyle = () => {
-  if (currentMode.value === 'pan') {
-    return isPanning.value ? 'grabbing' : 'grab'
-  }
-  // 如果正在拖曳框框，顯示 'move'
-  if (draggingLabelIndex.value !== -1) {
+  const isPanMode = currentMode.value === 'pan' || isCtrlPressed.value
+
+  // 正在拖曳中
+  if (isPanning.value || draggingLabelIndex.value !== -1) {
     return 'grabbing'
   }
-  // 如果滑鼠指著某個框框，顯示 'move' (提示可拖曳)
-  if (hoverLabelIndex.value !== -1) {
+
+  // 拖移模式下，hover 在框框上顯示小手
+  if (isPanMode && hoverLabelIndex.value !== -1) {
     return 'grab'
   }
-  // 預設畫圖模式
+
+  // 拖移模式下，空白處顯示小手
+  if (isPanMode) {
+    return 'grab'
+  }
+
+  // 標註模式，一律顯示十字
   return 'crosshair'
 }
 
@@ -675,8 +714,8 @@ const handleInputKeydown = (index: number, event: KeyboardEvent) => {
 const startDrawing = (event: MouseEvent) => {
   if (!canvas.value) return
 
-  // 判斷是否為拖移模式（拖移按鈕選中 或 按住 Alt）
-  const isPanMode = currentMode.value === 'pan' || event.altKey
+  // 判斷是否為拖移模式（拖移按鈕選中 或 按住 Ctrl）
+  const isPanMode = currentMode.value === 'pan' || event.ctrlKey
 
   const { x, y } = getCanvasCoords(event)
   const labels = currentImage.value?.labels || []
@@ -1319,9 +1358,10 @@ h1 {
   padding: 0.5rem;
   border-radius: 4px;
   cursor: pointer;
-  background-color: white;
+  background-color: #f0f0f0;
   border: 2px solid transparent;
   transition: all 0.3s;
+  color: #666;
 }
 
 .image-list-item:hover {
@@ -1331,7 +1371,7 @@ h1 {
 .image-list-item.active {
   border-color: #42b883;
   background-color: #e8f5e9;
-  color: #42b883;
+  color: #2d8a5f;
 }
 
 .image-list-item img {
