@@ -909,7 +909,7 @@ const fetchPredictionsForCurrentImage = async () => {
 
   await fetchPredictionsForImage(img)
   loadImage()
-  await runOCRForImage(img, 'student'); // 背景跑 OCR
+  // 學生卷 OCR 移到結果頁面執行，這裡只做 YOLO 偵測框框位置
 }
 
 const retryPrediction = () => {

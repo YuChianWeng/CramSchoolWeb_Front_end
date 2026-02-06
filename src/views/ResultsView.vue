@@ -533,34 +533,46 @@ const runStudentOCR = async (img: IncomingImage): Promise<IncomingImage> => {
   return img
 }
 
-// 對所有學生卷執行 OCR
+// 對所有學生卷執行 OCR（並行處理，最多 5 張同時）
 const processStudentOCR = async () => {
   if (scoredImages.value.length === 0) return
 
   isProcessingOCR.value = true
-  ocrProgress.value = { current: 0, total: scoredImages.value.length }
+  const expectedAnswers = getExpectedAnswers(masterKeyImage.value)
 
-  try {
-    const expectedAnswers = getExpectedAnswers(masterKeyImage.value)
-
-    for (let i = 0; i < scoredImages.value.length; i++) {
-      ocrProgress.value.current = i + 1
-      const img = scoredImages.value[i]
-      if (!img) continue
-
-      // 檢查是否已有 OCR 結果
-      const hasOcrResult = img.labels.some(l => l.recognizedAnswer || l.ocrCandidates)
-      if (hasOcrResult) continue
-
-      // 執行 OCR
-      const processedImg = await runStudentOCR(img)
-      if (!processedImg) continue
-      // 重新 normalize 以計算正確率
-      scoredImages.value[i] = normalizeImage(processedImg, [...expectedAnswers])
+  // 篩選需要 OCR 的圖片（還沒有結果的）
+  const toProcess: { index: number; img: NormalizedImage }[] = []
+  scoredImages.value.forEach((img, index) => {
+    if (!img) return
+    const hasOcrResult = img.labels.some(l => l.recognizedAnswer || l.ocrCandidates)
+    if (!hasOcrResult) {
+      toProcess.push({ index, img })
     }
-  } finally {
-    isProcessingOCR.value = false
+  })
+
+  ocrProgress.value = { current: 0, total: toProcess.length }
+
+  // 並行處理，每批最多 5 張，每張完成就更新進度
+  const BATCH_SIZE = 5
+  let completed = 0
+
+  for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
+    const batch = toProcess.slice(i, i + BATCH_SIZE)
+
+    // 同時處理這批圖片，每張完成就立即更新
+    await Promise.all(
+      batch.map(async ({ index, img }) => {
+        const processedImg = await runStudentOCR(img)
+        if (processedImg) {
+          scoredImages.value[index] = normalizeImage(processedImg, [...expectedAnswers])
+        }
+        completed++
+        ocrProgress.value.current = completed
+      })
+    )
   }
+
+  isProcessingOCR.value = false
 }
 
 onMounted(async () => {

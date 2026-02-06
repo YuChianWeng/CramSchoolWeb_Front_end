@@ -145,25 +145,32 @@ const handleFileSelect = (target: 'master' | 'students', event: Event) => {
   }
 }
 
-const addFiles = (target: 'master' | 'students', files: File[]) => {
-  files.forEach(file => {
-    if (file.type.startsWith('image/')) {
+const addFiles = async (target: 'master' | 'students', files: File[]) => {
+  // 先按檔名排序
+  const sortedFiles = [...files]
+    .filter(file => file.type.startsWith('image/'))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+
+  // 依序讀取，保持順序
+  for (const file of sortedFiles) {
+    const preview = await new Promise<string>((resolve) => {
       const reader = new FileReader()
-      reader.onload = (e) => {
-        const previewData = {
-          file,
-          name: file.name,
-          preview: e.target?.result as string
-        }
-        if (target === 'master') {
-          masterFile.value = previewData
-        } else {
-          studentFiles.value.push(previewData)
-        }
-      }
+      reader.onload = (e) => resolve(e.target?.result as string)
       reader.readAsDataURL(file)
+    })
+
+    const previewData = {
+      file,
+      name: file.name,
+      preview
     }
-  })
+
+    if (target === 'master') {
+      masterFile.value = previewData
+    } else {
+      studentFiles.value.push(previewData)
+    }
+  }
 }
 
 const clearMaster = () => {
