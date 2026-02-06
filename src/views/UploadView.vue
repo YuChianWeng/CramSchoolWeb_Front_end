@@ -3,7 +3,7 @@
     <h1>上傳圖片</h1>
     <div class="upload-area">
       <div class="upload-section">
-        <h2>標準答案卷（Master Key）</h2>
+        <h2>標準答案卷</h2>
         <div
           class="drop-zone"
           @dragover.prevent="handleDragOver('master')"

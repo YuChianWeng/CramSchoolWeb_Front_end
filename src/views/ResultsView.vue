@@ -290,11 +290,17 @@ const normalizeImage = (
 
     // 智能選擇 OCR 結果：根據正解是數字還是中文
     let normalizedRecognized = normalizeAnswer(label.recognizedAnswer)
-    if (label.ocrCandidates && expectedAnswer) {
-      const isExpectedDigit = /^\d+$/.test(expectedAnswer.trim())
-      normalizedRecognized = isExpectedDigit
-        ? (label.ocrCandidates.digit || '').trim()
-        : (label.ocrCandidates.chinese || '').trim()
+    if (label.ocrCandidates) {
+      if (expectedAnswer) {
+        // 有正解時，根據正解類型選擇
+        const isExpectedDigit = /^\d+$/.test(expectedAnswer.trim())
+        normalizedRecognized = isExpectedDigit
+          ? (label.ocrCandidates.digit || '').trim()
+          : (label.ocrCandidates.chinese || '').trim()
+      } else {
+        // 沒有正解時，預設顯示中文結果（若為空則顯示數字）
+        normalizedRecognized = (label.ocrCandidates.chinese || label.ocrCandidates.digit || '').trim()
+      }
     }
 
     let isCorrect = label.isCorrect
