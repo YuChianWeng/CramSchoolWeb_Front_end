@@ -1212,7 +1212,7 @@ const exportLabels = () => {
       annotations: labels.map(label => ({
         class: label.class,
         bbox: [label.x, label.y, label.width, label.height],
-        answer: label.answer || ''
+        answer: label.expectedAnswer || label.answer || ''
       }))
     }
   })
@@ -1269,7 +1269,33 @@ const goToResults = () => {
     students: cleanStudents
   });
 
-  // 4. 換頁
+  // 4. 背景儲存模板到後端（靜默，不擋換頁）
+  const master = masterKeyImage.value
+  const isFromTemplate = !!master?.preview?.startsWith('/api/exam-templates')
+  const hasLabels = (master?.labels?.length ?? 0) > 0
+  const hasAnswers = master?.labels?.some(l => l.expectedAnswer || l.answer)
+
+  if (master && hasLabels && hasAnswers && !isFromTemplate) {
+    const pages = [{
+      image: master.name,
+      annotations: (master.labels ?? []).map(label => ({
+        class: label.class,
+        bbox: [label.x, label.y, label.width, label.height],
+        answer: label.expectedAnswer || label.answer || ''
+      }))
+    }]
+    fetch('/api/exam-templates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        exam_name: master.name,
+        image_base64: master.preview,
+        pages
+      })
+    }).catch(() => {})
+  }
+
+  // 5. 換頁
   router.push({ name: 'results' });
 };
 </script>
