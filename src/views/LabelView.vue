@@ -21,7 +21,7 @@
             :class="{ active: viewMode === 'master' }"
             @click="viewMode = 'master'"
           >
-            標準卷檢視
+            答案卷檢視
           </button>
         </div>
         <div class="image-list">
@@ -93,7 +93,7 @@
                 <button 
                   :class="{ active: currentMode === 'pan' }" 
                   @click="currentMode = 'pan'"
-                >✋ 拖移（或按住ALT）</button>
+                >✋ 拖移（或按住Ctrl）</button>
               </div>
             </div>
 
@@ -102,18 +102,34 @@
               <span class="single-class-label">{{ DEFAULT_CLASS }}</span>
                 <button
                   @click="retryPrediction"
-                  :disabled="currentImage?.isPredicting || isMasterView"
+                  :disabled="currentImage?.isPredicting"
                   class="retry-btn"
                 >
                   重新偵測
                 </button>
               
-              <button 
-                @click="applyLabelsToAll" 
-                :disabled="!currentImage?.labels || currentImage.labels.length === 0 || isProcessingOCR" 
+              <button
+                @click="applyLabelsToAll"
+                :disabled="!currentImage?.labels || currentImage.labels.length === 0"
                 class="apply-all-btn"
               >
-                {{ isProcessingOCR ? '辨識中...' : '全部套用(答案辨識)' }}
+                全部套用
+              </button>
+
+              <button
+                @click="autoSort"
+                :disabled="!currentImage?.labels || currentImage.labels.length === 0"
+                class="auto-sort-btn"
+              >
+                自動排序
+              </button>
+
+              <button
+                @click="detectAnswers"
+                :disabled="isProcessingOCR"
+                class="detect-answers-btn"
+              >
+                {{ isProcessingOCR ? '辨識中...' : '答案偵測' }}
               </button>
             </div>
 
@@ -125,7 +141,7 @@
                   :key="index"
                   class="label-item"
                   :class="{ 'selected': index === selectedLabelIndex }"
-                  @click="focusLabelInput(index)"
+                  @click="isMasterView ? focusLabelInput(index) : selectLabel(index)"
                 >
                   <button @click.stop="removeLabel(index)" class="remove-label-btn">×</button>
 
@@ -134,20 +150,7 @@
                       {{ label.class }} ({{ index + 1 }})
                     </span>
 
-                    <div v-if="!isMasterView" class="label-input-group">
-                      <span class="input-prefix">答:</span>
-                      <input
-                        type="text"
-                        v-model="label.answer"
-                        maxlength="4"
-                        :ref="(el) => { if(el) inputRefs[index] = el as HTMLInputElement }"
-                        @focus="selectLabel(index)"
-                        @keydown="handleInputKeydown(index, $event)"
-                        @click.stop
-                        @input="updateRecognizedAnswer(label)"
-                      />
-                    </div>
-                    <div v-else class="label-expected">
+                    <div v-if="isMasterView" class="label-expected">
                       <span class="input-prefix">正解:</span>
                       <input
                         type="text"
@@ -172,7 +175,7 @@
                 :disabled="currentImageIndex === 0"
                 class="nav-btn"
               >
-                ← Previous
+                ← 上一張
               </button>
               <span class="image-counter">
                 {{ currentImageIndex + 1 }} / {{ displayedImages.length }}
@@ -182,14 +185,21 @@
                 :disabled="currentImageIndex === displayedImages.length - 1"
                 class="nav-btn"
               >
-                Next →
+                下一張 →
               </button>
             </div>
 
+            <div class="auto-apply-option">
+              <label class="checkbox-label">
+                <input type="checkbox" v-model="autoApplyMasterToResults" />
+                <span>自動套用答案卷標註到所有考卷</span>
+              </label>
+            </div>
+
             <div class="action-buttons">
-              <button @click="clearLabels" class="clear-labels-btn">Clear Labels</button>
-              <button @click="exportLabels" class="export-btn">Export Labels</button>
-              <button @click="goToResults" class="results-btn">View Results</button>
+              <button @click="clearLabels" class="clear-labels-btn">清除標註</button>
+              <button @click="exportLabels" class="export-btn">匯出標註</button>
+              <button @click="goToResults" class="results-btn">查看結果</button>
             </div>
           </div>
         </div>
@@ -202,7 +212,7 @@
 import { ref, computed, onMounted, watch, nextTick, onBeforeUpdate, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../constants'
-import { setResultsData } from '../stores/resultsStore'
+import { setResultsData, getStoreData, hasData, updateStudentImages, updateMasterImage } from '../stores/resultsStore'
 
 const DEFAULT_CLASS = '答案區'
 
@@ -240,12 +250,13 @@ const router = useRouter()
 const canvas = ref<HTMLCanvasElement | null>(null)
 const studentImages = ref<ImageData[]>([])
 const masterKeyImage = ref<ImageData | null>(null)
-const viewMode = ref<'student' | 'master'>('student')
+const viewMode = ref<'student' | 'master'>('master')
 const currentImageIndex = ref(0)
 const currentClass = ref(DEFAULT_CLASS)
 const isDrawing = ref(false)
 const isPanning = ref(false)
 const currentMode = ref<'draw' | 'pan'>('draw')
+const isCtrlPressed = ref(false) // 追蹤 Ctrl 鍵狀態
 const isProcessingOCR = ref(false)
 const startX = ref(0)
 const startY = ref(0)
@@ -257,6 +268,7 @@ const zoom = ref(1)
 
 const selectedLabelIndex = ref<number>(-1)
 const inputRefs = ref<HTMLInputElement[]>([])
+const autoApplyMasterToResults = ref(true) // 自動套用答案卷到結果頁的開關
 
 const displayedImages = computed(() =>
   viewMode.value === 'student'
@@ -274,31 +286,50 @@ onBeforeUpdate(() => {
   inputRefs.value = []
 })
 
-onMounted(() => {
-  // 註冊全域鍵盤監聽 (處理非輸入框時的刪除)
-  window.addEventListener('keydown', handleGlobalKeydown)
-
-  const state = history.state as { files?: ImageData[]; masterKey?: ImageData }
-  if (state?.files && state.files.length > 0) {
-    studentImages.value = state.files.map(f => ({
-      ...f,
-      labels: f.labels || [],
-      preview: f.preview,
-      predictionsLoaded: f.predictionsLoaded || false,
-      isPredicting: false,
-      predictionError: undefined,
-      role: 'student'
-    }))
+// 監聽 Ctrl 鍵狀態
+const handleKeyDown = (event: KeyboardEvent) => {
+  if (event.key === 'Control') {
+    isCtrlPressed.value = true
   }
-  if (state?.masterKey) {
-    masterKeyImage.value = {
-      ...state.masterKey,
-      labels: state.masterKey.labels || [],
-      preview: state.masterKey.preview,
-      predictionsLoaded: state.masterKey.predictionsLoaded || false,
-      isPredicting: false,
-      predictionError: undefined,
-      role: 'master'
+}
+const handleKeyUp = (event: KeyboardEvent) => {
+  if (event.key === 'Control') {
+    isCtrlPressed.value = false
+  }
+}
+
+onMounted(async () => {
+  // 註冊全域鍵盤監聽
+  window.addEventListener('keydown', handleGlobalKeydown)
+  window.addEventListener('keydown', handleKeyDown)
+  window.addEventListener('keyup', handleKeyUp)
+
+  // 從統一的 store 讀取資料
+  if (hasData()) {
+    const { studentImages: storedStudents, masterKeyImage: storedMaster } = getStoreData()
+
+    if (storedStudents.length > 0) {
+      studentImages.value = storedStudents.map((f: any) => ({
+        ...f,
+        labels: f.labels || [],
+        preview: f.preview,
+        predictionsLoaded: f.predictionsLoaded || false,
+        isPredicting: false,
+        predictionError: undefined,
+        role: 'student'
+      }))
+    }
+
+    if (storedMaster) {
+      masterKeyImage.value = {
+        ...storedMaster,
+        labels: storedMaster.labels || [],
+        preview: storedMaster.preview,
+        predictionsLoaded: storedMaster.predictionsLoaded || false,
+        isPredicting: false,
+        predictionError: undefined,
+        role: 'master'
+      }
     }
   }
   if (studentImages.value.length === 0) {
@@ -308,13 +339,72 @@ onMounted(() => {
     ]
   }
   currentImageIndex.value = 0
+
+  // 先顯示圖片
   nextTick(() => {
     handleImageChange()
   })
+
+  // 檢查是否已經有標註資料（例如從 ResultsView 返回）
+  const hasExistingLabels = studentImages.value.some(img => img.labels && img.labels.length > 0) ||
+    (masterKeyImage.value?.labels && masterKeyImage.value.labels.length > 0)
+
+  // 只有在沒有現有標註時才執行初始 YOLO 偵測
+  if (!hasExistingLabels) {
+    // 用第一張學生卷做 YOLO 偵測（手寫優化模型），然後套用到答案卷和其他學生卷
+    const firstStudent = studentImages.value[0]
+    if (firstStudent && firstStudent.preview) {
+      await fetchPredictionsForImage(firstStudent)
+
+      if (firstStudent.labels && firstStudent.labels.length > 0) {
+        // 自動排序
+        const previewImg = await loadPreviewImage(firstStudent.preview)
+        const isVertical = previewImg.height > previewImg.width
+        firstStudent.labels = isVertical
+          ? sortLabelsVertical(firstStudent.labels)
+          : sortLabelsRightToLeft(firstStudent.labels)
+
+        // 套用到答案卷
+        if (masterKeyImage.value) {
+          masterKeyImage.value.labels = firstStudent.labels.map(label => ({
+            ...label,
+            answer: '',
+            recognizedAnswer: undefined,
+            expectedAnswer: undefined,
+            ocrCandidates: undefined,
+            isCorrect: undefined
+          }))
+          masterKeyImage.value.predictionsLoaded = true
+          masterKeyImage.value.predictionError = undefined
+        }
+
+        // 套用到其他學生卷
+        const sourceLabels = firstStudent.labels
+        studentImages.value.forEach((student, index) => {
+          if (index === 0) return // 跳過第一張（已經有了）
+          student.labels = sourceLabels.map(label => ({
+            ...label,
+            answer: '',
+            recognizedAnswer: undefined,
+            expectedAnswer: undefined,
+            ocrCandidates: undefined,
+            isCorrect: undefined
+          }))
+          student.predictionsLoaded = true
+          student.predictionError = undefined
+        })
+
+        // 偵測完成後重新繪製
+        loadImage()
+      }
+    }
+  }
 });
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalKeydown)
+  window.removeEventListener('keydown', handleKeyDown)
+  window.removeEventListener('keyup', handleKeyUp)
 })
 
 watch(currentImageIndex, () => {
@@ -329,18 +419,24 @@ watch(viewMode, () => {
 })
 
 const getCursorStyle = () => {
-  if (currentMode.value === 'pan') {
-    return isPanning.value ? 'grabbing' : 'grab'
-  }
-  // 如果正在拖曳框框，顯示 'move'
-  if (draggingLabelIndex.value !== -1) {
+  const isPanMode = currentMode.value === 'pan' || isCtrlPressed.value
+
+  // 正在拖曳中
+  if (isPanning.value || draggingLabelIndex.value !== -1) {
     return 'grabbing'
   }
-  // 如果滑鼠指著某個框框，顯示 'move' (提示可拖曳)
-  if (hoverLabelIndex.value !== -1) {
+
+  // 拖移模式下，hover 在框框上顯示小手
+  if (isPanMode && hoverLabelIndex.value !== -1) {
     return 'grab'
   }
-  // 預設畫圖模式
+
+  // 拖移模式下，空白處顯示小手
+  if (isPanMode) {
+    return 'grab'
+  }
+
+  // 標註模式，一律顯示十字
   return 'crosshair'
 }
 
@@ -416,20 +512,25 @@ const runOCRForImage = async (img: ImageData, target: 'student' | 'master') => {
       }))
     };
 
-    // 2. 呼叫後端
+    // 2. 呼叫後端（加入 30 秒逾時）
     const endpoint = target === 'master' ? '/ocr_google' : '/api/ocr_process'
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 30000)
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(inputPayload)
+      body: JSON.stringify(inputPayload),
+      signal: controller.signal
     });
+    clearTimeout(timeoutId)
 
     if (!response.ok) throw new Error('OCR API Error');
     const resultData = await response.json();
 
     // 3. 將回傳結果填入 labels
     const results = resultData.ocr_results || resultData.results || [];
-    
+    console.log('OCR 回傳結果:', JSON.stringify(results, null, 2)) // 偵錯用
+
     if (Array.isArray(results)) {
       results.forEach((res: any, index: number) => {
         // 確保對應的 label 還存在
@@ -437,9 +538,11 @@ const runOCRForImage = async (img: ImageData, target: 'student' | 'master') => {
           const targetLabel = img.labels[index];
           if (target === 'master') {
             // 優先抓取 google_text，避免 extractTextValue 誤抓 bbox 數字
-            targetLabel.expectedAnswer = res.google_text || extractTextValue(res)
+            const googleText = res.google_text ?? res.text ?? res.answer ?? ''
+            targetLabel.expectedAnswer = typeof googleText === 'string' ? googleText : ''
             targetLabel.ocrCandidates = undefined
             targetLabel.recognizedAnswer = undefined
+            console.log(`Label ${index}: expectedAnswer = "${targetLabel.expectedAnswer}"`) // 偵錯用
           } else {
             const candidate =
               res && (res.chinese !== undefined || res.digit !== undefined)
@@ -623,51 +726,55 @@ const handleInputKeydown = (index: number, event: KeyboardEvent) => {
 const startDrawing = (event: MouseEvent) => {
   if (!canvas.value) return
 
-  // 1. 如果是平移模式或按住 Alt，保持原樣
-  if (currentMode.value === 'pan' || event.button !== 0 || event.altKey) {
-    startPan(event)
-    return
-  }
+  // 判斷是否為拖移模式（拖移按鈕選中 或 按住 Ctrl）
+  const isPanMode = currentMode.value === 'pan' || event.ctrlKey
 
   const { x, y } = getCanvasCoords(event)
-  
-  // [修正] 確保 labels 是一個陣列，如果是 undefined 則給空陣列
   const labels = currentImage.value?.labels || []
-  
-  // 2. 檢查是否點擊在現有的框框上
+
+  // 檢查是否點擊在現有的框框上
   let hitIndex = -1
   for (let i = labels.length - 1; i >= 0; i--) {
     const l = labels[i]
-    
-    // [修正] 紅字解決重點：如果 l 是 undefined，直接跳過這一次迴圈
-    if (!l) continue; 
-
+    if (!l) continue
     if (x >= l.x && x <= l.x + l.width && y >= l.y && y <= l.y + l.height) {
       hitIndex = i
       break
     }
   }
 
-  // 3. 如果點到了框框 -> 進入「拖曳模式」
-  if (hitIndex !== -1) {
-    draggingLabelIndex.value = hitIndex
-    selectedLabelIndex.value = hitIndex
-    
-    // [修正] 紅字解決重點：先取出該 label 並檢查是否存在
-    const targetLabel = labels[hitIndex]
-    if (targetLabel) {
-      dragOffset.value = {
-        x: x - targetLabel.x,
-        y: y - targetLabel.y
+  // === 拖移模式 ===
+  if (isPanMode) {
+    if (hitIndex !== -1) {
+      // 點到框框 → 移動框框
+      draggingLabelIndex.value = hitIndex
+      selectedLabelIndex.value = hitIndex
+      const targetLabel = labels[hitIndex]
+      if (targetLabel) {
+        dragOffset.value = {
+          x: x - targetLabel.x,
+          y: y - targetLabel.y
+        }
       }
+      focusLabelInput(hitIndex)
+      loadImage()
+    } else {
+      // 點到空白處 → 移動畫布
+      startPan(event)
     }
-    
-    focusLabelInput(hitIndex)
-    loadImage()
-    return 
+    return
   }
 
-  // 4. 沒點到框框 -> 清除選取並開始「畫新框」
+  // === 標註模式 ===
+  // 點到框框 → 選取該框框（不移動）
+  if (hitIndex !== -1) {
+    selectedLabelIndex.value = hitIndex
+    focusLabelInput(hitIndex)
+    loadImage()
+    return
+  }
+
+  // 點到空白處 → 清除選取並開始畫新框
   if (selectedLabelIndex.value !== -1) {
     selectedLabelIndex.value = -1
     loadImage()
@@ -746,9 +853,9 @@ const extractBase64FromPreview = (preview: string) => {
   return separatorIndex >= 0 ? preview.slice(separatorIndex + 1) : preview
 }
 
-const fetchPredictionsForCurrentImage = async () => {
-  const img = currentImage.value
-  if (!img || img.role !== 'student' || !img.preview || img.isPredicting || img.predictionsLoaded) return
+// [新增] 通用函數：對任意圖片執行 YOLO 偵測
+const fetchPredictionsForImage = async (img: ImageData) => {
+  if (!img || !img.preview || img.isPredicting || img.predictionsLoaded) return
 
   img.isPredicting = true
   img.predictionError = undefined
@@ -760,7 +867,7 @@ const fetchPredictionsForCurrentImage = async () => {
     const image_base64 = base64.includes('base64,')
     ? base64.split('base64,')[1]
     : base64
-    const response = await fetch('/api/predict', { 
+    const response = await fetch('/api/predict', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -800,8 +907,6 @@ const fetchPredictionsForCurrentImage = async () => {
 
     img.labels = mappedLabels
     img.predictionsLoaded = true
-    loadImage() // [新增這一行] 框框出來後，馬上叫後端去辨識裡面的字
-    await runOCRForImage(img, 'student'); // 背景跑 OCR
   } catch (error: any) {
     console.error('Error fetching predictions:', error)
     img.predictionError = error?.message || 'Unable to fetch predictions'
@@ -810,9 +915,18 @@ const fetchPredictionsForCurrentImage = async () => {
   }
 }
 
+const fetchPredictionsForCurrentImage = async () => {
+  const img = currentImage.value
+  if (!img) return
+
+  await fetchPredictionsForImage(img)
+  loadImage()
+  // 學生卷 OCR 移到結果頁面執行，這裡只做 YOLO 偵測框框位置
+}
+
 const retryPrediction = () => {
   const img = currentImage.value
-  if (!img || img.role !== 'student' || img.isPredicting) return
+  if (!img || img.isPredicting) return
 
   img.predictionsLoaded = false
   img.predictionError = undefined
@@ -955,58 +1069,121 @@ const previousImage = () => {
   }
 }
 
-// [修改] 將當前圖片的標註套用到所有圖片 (修正：清除舊 OCR 結果並重新辨識)
-const applyLabelsToAll = async () => {
+// [修改] 將當前圖片的標註框套用到所有圖片（不執行OCR）
+const applyLabelsToAll = () => {
   // 1. 基本檢查
   if (!currentImage.value?.labels || currentImage.value.labels.length === 0) return
 
   const totalTargets = studentImages.value.length + (masterKeyImage.value ? 1 : 0)
-  const confirmMsg = `確定要將目前的 ${currentImage.value.labels.length} 個標註框與答案套用到所有 ${totalTargets} 張圖片嗎？\n\n注意：這將會覆蓋其他圖片現有的標註，並重新執行 OCR 辨識！`
+  const confirmMsg = `確定要將目前的 ${currentImage.value.labels.length} 個標註框套用到所有 ${totalTargets} 張圖片嗎？\n\n注意：這將會覆蓋其他圖片現有的標註！`
   if (!confirm(confirmMsg)) return
+
+  // 2. 準備「乾淨」的樣板
+  const isMasterSource = currentImage.value.role === 'master'
+  const sourceLabels = currentImage.value.labels.map(label => ({
+    ...label,
+    recognizedAnswer: undefined,
+    expectedAnswer: isMasterSource ? label.expectedAnswer : undefined,
+    ocrCandidates: undefined,
+    isCorrect: undefined
+  }))
+
+  if (masterKeyImage.value) {
+    masterKeyImage.value.labels = sourceLabels.map(label => ({
+      ...label,
+      answer: ''
+    }))
+    masterKeyImage.value.predictionsLoaded = true
+    masterKeyImage.value.predictionError = undefined
+  }
+
+  studentImages.value.forEach(img => {
+    img.labels = sourceLabels.map(label => ({
+      ...label,
+      answer: isMasterSource ? '' : label.answer
+    }))
+    img.predictionsLoaded = true
+    img.predictionError = undefined
+  })
+
+  alert('已成功套用標註框！')
+}
+
+// [新增] 排序標註：從右上到左下（先上到下，再右到左）
+const sortLabelsRightToLeft = (labels: Label[]): Label[] => {
+  return [...labels].sort((a, b) => {
+    // 先按 Y 座標排序（小到大，從上到下）
+    const yDiff = Math.abs(a.y - b.y)
+    if (yDiff > 10) { // 如果 Y 座標差異大於 10px，認為是不同行
+      return a.y - b.y
+    }
+    // 同一行內，按 X 座標排序（大到小，從右到左）
+    return b.x - a.x
+  })
+}
+
+// [新增] 直式考卷排序：左半部優先，每半部內由上到下、由左到右
+const sortLabelsVertical = (labels: Label[]): Label[] => {
+  if (labels.length === 0) return labels
+
+  const centerXs = labels.map(l => l.x + l.width / 2).sort((a, b) => a - b)
+  const midLine = centerXs[Math.floor(centerXs.length / 2)] ?? 0
+
+  return [...labels].sort((a, b) => {
+    const aIsLeft = (a.x + a.width / 2) < midLine
+    const bIsLeft = (b.x + b.width / 2) < midLine
+
+    // 左半部優先於右半部
+    if (aIsLeft !== bIsLeft) return aIsLeft ? -1 : 1
+
+    // 同一半部內：先按 Y（由上到下）
+    const yDiff = Math.abs(a.y - b.y)
+    if (yDiff > 10) return a.y - b.y
+
+    // 同一行內：按 X（由左到右）
+    return a.x - b.x
+  })
+}
+
+// [新增] 自動排序：根據圖片寬高判斷直式/橫式並排序
+const autoSort = async () => {
+  const img = currentImage.value
+  if (!img?.labels || img.labels.length === 0 || !img.preview) return
+
+  const previewImg = await loadPreviewImage(img.preview)
+  const isVertical = previewImg.height > previewImg.width
+
+  if (isVertical) {
+    img.labels = sortLabelsVertical(img.labels)
+    alert('已偵測為直式考卷，排序完成（左半部優先，由上到下、由左到右）')
+  } else {
+    img.labels = sortLabelsRightToLeft(img.labels)
+    alert('已偵測為橫式考卷，排序完成（由上到下、由右到左）')
+  }
+
+  loadImage()
+}
+
+// [修改] 只對答案卷執行答案偵測（學生卷 OCR 移至結果頁面）
+const detectAnswers = async () => {
+  // 只處理答案卷
+  if (!masterKeyImage.value || !masterKeyImage.value.labels || masterKeyImage.value.labels.length === 0) {
+    alert('請先在答案卷建立標註框！')
+    return
+  }
 
   isProcessingOCR.value = true
 
   try {
-    // 2. 準備「乾淨」的樣板
-    const isMasterSource = currentImage.value.role === 'master'
-    const sourceLabels = currentImage.value.labels.map(label => ({
-      ...label,
-      recognizedAnswer: undefined,
-      expectedAnswer: isMasterSource ? label.expectedAnswer : undefined,
-      ocrCandidates: undefined,
-      isCorrect: undefined
-    }))
+    await runOCRForImage(masterKeyImage.value, 'master')
 
-    const targets: ImageData[] = []
-    if (masterKeyImage.value) {
-      masterKeyImage.value.labels = sourceLabels.map(label => ({
-        ...label,
-        answer: ''
-      }))
-      masterKeyImage.value.predictionsLoaded = true
-      masterKeyImage.value.predictionError = undefined
-      targets.push(masterKeyImage.value)
-    }
+    // 重新繪製畫面
+    loadImage()
 
-    studentImages.value.forEach(img => {
-      img.labels = sourceLabels.map(label => ({
-        ...label,
-        answer: isMasterSource ? '' : label.answer
-      }))
-      img.predictionsLoaded = true
-      img.predictionError = undefined
-      targets.push(img)
-    })
-
-    for (const targetImg of targets) {
-      if (targetImg.role === 'student') {
-        await runOCRForImage(targetImg, 'student')
-      } else {
-        await runOCRForImage(targetImg, 'master')
-      }
-    }
-
-    alert('已成功套用！系統已完成 OCR 辨識。')
+    alert('答案卷偵測完成！正解已填入。')
+  } catch (error) {
+    console.error('答案偵測失敗:', error)
+    alert('答案偵測過程中發生錯誤，請查看控制台。')
   } finally {
     isProcessingOCR.value = false
   }
@@ -1035,7 +1212,7 @@ const exportLabels = () => {
       annotations: labels.map(label => ({
         class: label.class,
         bbox: [label.x, label.y, label.width, label.height],
-        answer: label.answer || ''
+        answer: label.expectedAnswer || label.answer || ''
       }))
     }
   })
@@ -1052,19 +1229,73 @@ const exportLabels = () => {
 const goToResults = () => {
   if (!currentImage.value) return;
 
+  // [新增] 如果開關開啟，自動套用答案卷標註到所有學生考卷
+  if (autoApplyMasterToResults.value && masterKeyImage.value?.labels && masterKeyImage.value.labels.length > 0) {
+    const masterLabels = masterKeyImage.value.labels
+
+    studentImages.value.forEach(student => {
+      // 為每個學生建立新的 labels，基於 master 的框框位置和 expectedAnswer
+      student.labels = masterLabels.map((masterLabel, index) => {
+        // 如果學生已經有這個位置的標註資料，保留它的 OCR 結果
+        const existingLabel = student.labels?.[index]
+
+        return {
+          ...masterLabel, // 複製框框位置和 class
+          expectedAnswer: masterLabel.expectedAnswer, // 複製正解
+          answer: existingLabel?.answer || '', // 保留學生的答案（如果有）
+          recognizedAnswer: existingLabel?.recognizedAnswer, // 保留 OCR 結果
+          ocrCandidates: existingLabel?.ocrCandidates, // 保留 OCR 候選
+          isCorrect: existingLabel?.isCorrect // 保留判定結果
+        }
+      })
+      student.predictionsLoaded = true
+      student.predictionError = undefined
+    })
+  }
+
   // 1. 深拷貝整理資料
   const cleanMasterKey = masterKeyImage.value
     ? JSON.parse(JSON.stringify(masterKeyImage.value))
     : null
   const cleanStudents = JSON.parse(JSON.stringify(studentImages.value))
 
-  // 2. 存入 Store (這裡就不會報錯了，因為上面有 import)
+  // 2. 同步更新 store（保持資料持久）
+  updateStudentImages(cleanStudents)
+  updateMasterImage(cleanMasterKey)
+
+  // 3. 同時設定 resultsData（供 ResultsView 使用）
   setResultsData({
     masterKey: cleanMasterKey,
     students: cleanStudents
   });
 
-  // 3. 換頁
+  // 4. 背景儲存模板到後端（靜默，不擋換頁）
+  const master = masterKeyImage.value
+  const isFromTemplate = !!master?.preview?.startsWith('/api/exam-templates')
+  const hasLabels = (master?.labels?.length ?? 0) > 0
+  const hasAnswers = master?.labels?.some(l => l.expectedAnswer || l.answer)
+
+  if (master && hasLabels && hasAnswers && !isFromTemplate) {
+    const pages = [{
+      image: master.name,
+      annotations: (master.labels ?? []).map(label => ({
+        class: label.class,
+        bbox: [label.x, label.y, label.width, label.height],
+        answer: label.expectedAnswer || label.answer || ''
+      }))
+    }]
+    fetch('/api/exam-templates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        exam_name: master.name,
+        image_base64: master.preview,
+        pages
+      })
+    }).catch(() => {})
+  }
+
+  // 5. 換頁
   router.push({ name: 'results' });
 };
 </script>
@@ -1169,9 +1400,10 @@ h1 {
   padding: 0.5rem;
   border-radius: 4px;
   cursor: pointer;
-  background-color: white;
+  background-color: #f0f0f0;
   border: 2px solid transparent;
   transition: all 0.3s;
+  color: #666;
 }
 
 .image-list-item:hover {
@@ -1181,7 +1413,7 @@ h1 {
 .image-list-item.active {
   border-color: #42b883;
   background-color: #e8f5e9;
-  color: #42b883;
+  color: #2d8a5f;
 }
 
 .image-list-item img {
@@ -1320,15 +1552,12 @@ canvas {
   background-color: #673ab7; /* 紫色，代表批次處理 */
   color: #fff;
   border: none;
-  padding: 0.4rem 0.8rem; /* 稍微大一點點 */
+  padding: 0.4rem 0.8rem;
   border-radius: 4px;
   cursor: pointer;
   font-size: 0.9rem;
   margin-left: 10px; /* 與左邊按鈕拉開距離 */
   transition: background-color 0.2s;
-  display: flex;
-  align-items: center;
-  gap: 4px;
 }
 
 .apply-all-btn:hover {
@@ -1337,6 +1566,50 @@ canvas {
 
 .apply-all-btn:disabled {
   background-color: #b39ddb;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.auto-sort-btn {
+  background-color: #009688;
+  color: #fff;
+  border: none;
+  padding: 0.4rem 0.8rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  margin-left: 10px;
+  transition: background-color 0.2s;
+}
+
+.auto-sort-btn:hover {
+  background-color: #00796b;
+}
+
+.auto-sort-btn:disabled {
+  background-color: #80cbc4;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.detect-answers-btn {
+  background-color: #ff9800; /* 橙色，代表辨識功能 */
+  color: #fff;
+  border: none;
+  padding: 0.4rem 0.8rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  margin-left: 10px;
+  transition: background-color 0.2s;
+}
+
+.detect-answers-btn:hover {
+  background-color: #f57c00;
+}
+
+.detect-answers-btn:disabled {
+  background-color: #ffcc80;
   cursor: not-allowed;
   opacity: 0.7;
 }
@@ -1501,13 +1774,15 @@ canvas {
 }
 
 .expected-value {
-  min-width: 70px;
+  width: 70px;
   padding: 4px 8px;
+  border: 2px solid #ddd;
   border-radius: 6px;
   background-color: #fff7e6;
   color: #8a5a00;
   text-align: center;
-  font-size: 1.1rem;
+  font-size: 1.2rem;
+  font-weight: bold;
 }
 
 .input-prefix {
@@ -1599,6 +1874,41 @@ canvas {
 .image-counter {
   font-weight: bold;
   color: #2c3e50;
+}
+
+.auto-apply-option {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  background-color: #f9f9f9;
+  border-radius: 6px;
+  border: 1px solid #e0e0e0;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  user-select: none;
+  color: #2c3e50;
+  font-weight: 500;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #42b883;
+}
+
+.checkbox-label span {
+  font-size: 0.95rem;
+}
+
+.checkbox-label:hover {
+  color: #42b883;
 }
 
 .action-buttons {

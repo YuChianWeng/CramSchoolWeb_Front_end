@@ -12,7 +12,14 @@
       </div>
     </div>
 
-    <div v-if="scoredImages.length === 0" class="empty-state">
+    <!-- OCR 處理中的 loading 狀態 -->
+    <div v-if="isProcessingOCR" class="loading-state">
+      <div class="loading-spinner"></div>
+      <p>正在辨識學生答案...</p>
+      <p class="loading-progress">{{ ocrProgress.current }} / {{ ocrProgress.total }}</p>
+    </div>
+
+    <div v-else-if="scoredImages.length === 0" class="empty-state">
       <p>目前沒有批改結果，請先完成標記與批改。</p>
       <div class="empty-actions">
         <button class="primary-btn" @click="goToUpload">上傳照片</button>
@@ -135,7 +142,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { getResultsData } from '../stores/resultsStore'
+import { getResultsData, updateStudentImages, updateMasterImage } from '../stores/resultsStore'
+
+// OCR 處理狀態
+const isProcessingOCR = ref(false)
+const ocrProgress = ref({ current: 0, total: 0 })
 
 interface LabelResult {
   recognizedAnswer?: string
@@ -146,6 +157,10 @@ interface LabelResult {
   y?: number
   width?: number
   height?: number
+  ocrCandidates?: {
+    chinese: string
+    digit: string
+  }
 }
 
 interface IncomingImage {
@@ -268,11 +283,26 @@ const normalizeImage = (
   expectedAnswers: string[] = []
 ): NormalizedImage => {
   const labels = (img.labels ?? []).map((label, index) => {
-    const normalizedRecognized = normalizeAnswer(label.recognizedAnswer)
     const normalizedAnswer = normalizeAnswer(label.answer)
     const expectedFromMaster = expectedAnswers[index] || ''
     const expectedAnswer =
       expectedFromMaster || normalizeAnswer(label.expectedAnswer) || normalizedAnswer
+
+    // 智能選擇 OCR 結果：根據正解是數字還是中文
+    let normalizedRecognized = normalizeAnswer(label.recognizedAnswer)
+    if (label.ocrCandidates) {
+      if (expectedAnswer) {
+        // 有正解時，根據正解類型選擇
+        const isExpectedDigit = /^\d+$/.test(expectedAnswer.trim())
+        normalizedRecognized = isExpectedDigit
+          ? (label.ocrCandidates.digit || '').trim()
+          : (label.ocrCandidates.chinese || '').trim()
+      } else {
+        // 沒有正解時，預設顯示中文結果（若為空則顯示數字）
+        normalizedRecognized = (label.ocrCandidates.chinese || label.ocrCandidates.digit || '').trim()
+      }
+    }
+
     let isCorrect = label.isCorrect
     if (typeof isCorrect !== 'boolean' && expectedAnswer && normalizedRecognized) {
       isCorrect = normalizedRecognized === normalizeAnswer(expectedAnswer)
@@ -413,15 +443,177 @@ const loadResultsFromState = () => {
   scoredImages.value = []
 }
 
-onMounted(() => {
+// 計算圖片縮放參數（與 LabelView 相同邏輯）
+const computeFit = (imgWidth: number, imgHeight: number) => {
+  const scaleX = BASE_CANVAS_WIDTH / imgWidth
+  const scaleY = BASE_CANVAS_HEIGHT / imgHeight
+  const scale = Math.min(scaleX, scaleY)
+  const offsetX = (BASE_CANVAS_WIDTH - imgWidth * scale) / 2
+  const offsetY = (BASE_CANVAS_HEIGHT - imgHeight * scale) / 2
+  return { scale, offsetX, offsetY }
+}
+
+// 載入圖片取得尺寸
+const loadPreviewImage = (preview: string): Promise<HTMLImageElement> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = reject
+    img.src = preview
+  })
+}
+
+// 對單一學生卷執行 OCR
+const runStudentOCR = async (img: IncomingImage): Promise<IncomingImage> => {
+  if (!img.preview || !img.labels || img.labels.length === 0) return img
+
+  try {
+    // 準備 base64 資料
+    const base64Data = img.preview.replace(/^data:image\/\w+;base64,/, '')
+
+    // 載入圖片取得原始尺寸，計算縮放參數
+    const previewImg = await loadPreviewImage(img.preview)
+    const { scale, offsetX, offsetY } = computeFit(previewImg.width, previewImg.height)
+
+    // 計算 bbox（轉換回原圖座標）
+    const inputPayload = {
+      image: base64Data,
+      annotations: img.labels.map(l => {
+        const x = l.x ?? 0
+        const y = l.y ?? 0
+        const w = l.width ?? 0
+        const h = l.height ?? 0
+        return {
+          class: '答案區',
+          bbox: [
+            (x - offsetX) / scale,
+            (y - offsetY) / scale,
+            ((x - offsetX) / scale) + (w / scale),
+            ((y - offsetY) / scale) + (h / scale)
+          ]
+        }
+      })
+    }
+
+    console.log(`學生卷 ${img.name} OCR 送出:`, inputPayload.annotations.slice(0, 3)) // 偵錯用
+
+    // 呼叫後端（30 秒逾時）
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 30000)
+
+    const response = await fetch('/api/ocr_process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(inputPayload),
+      signal: controller.signal
+    })
+    clearTimeout(timeoutId)
+
+    if (!response.ok) throw new Error('OCR API Error')
+    const resultData = await response.json()
+    const results = resultData.ocr_results || resultData.results || []
+
+    console.log(`學生卷 ${img.name} OCR 回傳:`, results) // 偵錯用
+
+    // 將 OCR 結果填入 labels
+    if (Array.isArray(results)) {
+      const updatedLabels = img.labels.map((label, index) => {
+        const res = results[index]
+        if (!res) return label
+
+        const candidate = (res.chinese !== undefined || res.digit !== undefined)
+          ? { chinese: String(res.chinese || ''), digit: String(res.digit || '') }
+          : undefined
+
+        return {
+          ...label,
+          ocrCandidates: candidate,
+          recognizedAnswer: candidate ? undefined : extractTextValue(res)
+        }
+      })
+      return { ...img, labels: updatedLabels }
+    }
+  } catch (error) {
+    console.warn(`圖片 ${img.name} OCR 失敗:`, error)
+  }
+  return img
+}
+
+// 對所有學生卷執行 OCR（並行處理，最多 5 張同時）
+const processStudentOCR = async () => {
+  if (scoredImages.value.length === 0) return
+
+  isProcessingOCR.value = true
+  const expectedAnswers = getExpectedAnswers(masterKeyImage.value)
+
+  // 篩選需要 OCR 的圖片（還沒有結果的）
+  const toProcess: { index: number; img: NormalizedImage }[] = []
+  scoredImages.value.forEach((img, index) => {
+    if (!img) return
+    const hasOcrResult = img.labels.some(l => l.recognizedAnswer || l.ocrCandidates)
+    if (!hasOcrResult) {
+      toProcess.push({ index, img })
+    }
+  })
+
+  ocrProgress.value = { current: 0, total: toProcess.length }
+
+  // 並行處理，每批最多 5 張，每張完成就更新進度
+  const BATCH_SIZE = 5
+  let completed = 0
+
+  for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
+    const batch = toProcess.slice(i, i + BATCH_SIZE)
+
+    // 同時處理這批圖片，每張完成就立即更新
+    await Promise.all(
+      batch.map(async ({ index, img }) => {
+        const processedImg = await runStudentOCR(img)
+        if (processedImg) {
+          scoredImages.value[index] = normalizeImage(processedImg, [...expectedAnswers])
+        }
+        completed++
+        ocrProgress.value.current = completed
+      })
+    )
+  }
+
+  isProcessingOCR.value = false
+}
+
+onMounted(async () => {
   loadResultsFromState()
+  // 載入資料後自動執行學生卷 OCR
+  await processStudentOCR()
 })
 
 const goToLabel = () => {
-  router.push({
-    name: 'label',
-    state: { files: scoredImages.value, masterKey: masterKeyImage.value }
-  })
+  // 確保傳回的資料包含所有必要屬性，避免 LabelView 重新偵測
+  const filesForLabel = scoredImages.value.map(img => ({
+    ...img,
+    preview: img.preview || '',
+    role: 'student' as const,
+    predictionsLoaded: true,  // 已經有 labels，不需重新偵測
+    isPredicting: false,
+    predictionError: undefined
+  }))
+
+  const masterForLabel = masterKeyImage.value
+    ? {
+        ...masterKeyImage.value,
+        preview: masterKeyImage.value.preview || '',
+        role: 'master' as const,
+        predictionsLoaded: true,
+        isPredicting: false,
+        predictionError: undefined
+      }
+    : null
+
+  // 同步更新 store（統一的資料來源）
+  updateStudentImages(filesForLabel as any)
+  updateMasterImage(masterForLabel as any)
+
+  router.push({ name: 'label' })
 }
 
 const goToUpload = () => {
@@ -532,6 +724,36 @@ h1 {
 
 .ghost-btn:hover {
   background: #eef4f8;
+}
+
+.loading-state {
+  background: white;
+  border: 1px solid #d7dee5;
+  border-radius: 12px;
+  padding: 3rem 2rem;
+  text-align: center;
+  color: #5f6b7a;
+}
+
+.loading-spinner {
+  width: 48px;
+  height: 48px;
+  border: 4px solid #e8f5e9;
+  border-top-color: #42b883;
+  border-radius: 50%;
+  margin: 0 auto 1rem;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.loading-progress {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #42b883;
+  margin-top: 0.5rem;
 }
 
 .empty-state {
