@@ -2,6 +2,11 @@
 
 A Vue 3 front-end application for YOLO image labeling with three main function pages.
 
+Back end linked
+- https://github.com/KevinLin0919/CramSchool_Storing
+- https://github.com/leo8799/CramSchool_YOLO_Backend
+- https://github.com/Kellen-hung/FudanOCR_api
+
 ## Features
 
 ### 📁 Upload Page
