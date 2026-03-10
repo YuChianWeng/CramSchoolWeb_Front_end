@@ -1,0 +1,38 @@
+server {
+    listen 80;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # SPA fallback
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # OCR 服務 (預設 port 8083)
+    location /api/ocr_process/ {
+        proxy_pass ${OCR_URL}/ocr/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # YOLO 預測服務 (預設 port 8082)
+    location /api/predict/ {
+        proxy_pass ${PREDICT_URL}/predict/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # Google OCR
+    location /ocr_google/ {
+        proxy_pass ${GOOGLE_OCR_URL}/ocr_google/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # 模板儲存服務 (預設 port 8084)
+    location /api/exam-templates/ {
+        proxy_pass ${EXAM_TEMPLATE_URL}/api/exam-templates/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
