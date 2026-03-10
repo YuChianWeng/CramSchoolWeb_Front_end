@@ -73,6 +73,49 @@ npm run build
 npm run preview
 ```
 
+### API Proxy 設定
+
+開發模式下 API 透過 `vite.config.ts` 的 proxy 轉發，如需修改目標位址請編輯該檔案的 `server.proxy` 欄位。
+
+| 路徑 | 服務 |
+|------|------|
+| `/api/ocr_process` | OCR 辨識 (port 8083) |
+| `/api/predict` | YOLO 預測 (port 8082) |
+| `/ocr_google` | Google OCR (port 8083) |
+| `/api/exam-templates` | 模板儲存 (port 8084) |
+
+---
+
+## Docker
+
+### Build image
+
+```bash
+docker build -t cramschool-frontend .
+```
+
+### Run container
+
+透過環境變數指定各 API 目標位址（可隨時修改，不需重新 build）：
+
+```bash
+docker run -p 8080:80 \
+  -e OCR_URL=http://140.115.54.239:8083 \
+  -e PREDICT_URL=http://140.115.54.241:8082 \
+  -e GOOGLE_OCR_URL=http://140.115.54.241:8083 \
+  -e EXAM_TEMPLATE_URL=http://140.115.54.241:8084 \
+  cramschool-frontend
+```
+
+開啟 `http://localhost:8080`
+
+| 環境變數 | 對應服務 |
+|---------|---------|
+| `OCR_URL` | OCR 辨識服務 |
+| `PREDICT_URL` | YOLO 預測服務 |
+| `GOOGLE_OCR_URL` | Google OCR 服務 |
+| `EXAM_TEMPLATE_URL` | 模板儲存服務 |
+
 ## Project Structure
 
 ```
